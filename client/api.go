@@ -30,7 +30,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/arangodb/arangosync/tasks"
+	"github.com/arangodb/arangosync-client/tasks"
 	"github.com/pkg/errors"
 )
 

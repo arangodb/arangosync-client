@@ -41,7 +41,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/arangodb/arangosync/pkg/jwt"
+	"github.com/arangodb/arangosync-client/pkg/jwt"
 	"github.com/pkg/errors"
 )
 

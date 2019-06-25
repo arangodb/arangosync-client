@@ -35,7 +35,7 @@ import (
 
 	"github.com/pkg/errors"
 
-	"github.com/arangodb/arangosync/pkg/retry"
+	"github.com/arangodb/arangosync-client/pkg/retry"
 )
 
 var (

@@ -34,7 +34,7 @@ import (
 
 	certificates "github.com/arangodb-helper/go-certificates"
 
-	"github.com/arangodb/arangosync/pkg/errors"
+	"github.com/arangodb/arangosync-client/pkg/errors"
 	"github.com/rs/zerolog"
 )
 

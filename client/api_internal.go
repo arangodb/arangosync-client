@@ -33,7 +33,7 @@ import (
 	"math"
 	"time"
 
-	"github.com/arangodb/arangosync/tasks"
+	"github.com/arangodb/arangosync-client/tasks"
 )
 
 // InternalMasterAPI contains the internal API of the sync master.
