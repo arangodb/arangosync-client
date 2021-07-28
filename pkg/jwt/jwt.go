@@ -1,5 +1,5 @@
 //
-// Copyright 2017 ArangoDB GmbH, Cologne, Germany
+// Copyright 2017-2021 ArangoDB GmbH, Cologne, Germany
 //
 // The Programs (which include both the software and documentation) contain
 // proprietary information of ArangoDB GmbH; they are provided under a license
@@ -22,6 +22,7 @@
 // you entered into with ArangoDB GmbH.
 //
 // Author Ewout Prangsma
+// Author Tomasz Mielech
 //
 
 package jwt
@@ -31,7 +32,7 @@ import (
 	"net/http"
 	"strings"
 
-	jg "github.com/dgrijalva/jwt-go"
+	"github.com/golang-jwt/jwt"
 )
 
 const (
@@ -65,7 +66,7 @@ func CreateArangodJwtAuthorizationHeader(jwtSecret string) (string, error) {
 	}
 	// Create a new token object, specifying signing method and the claims
 	// you would like it to contain.
-	token := jg.NewWithClaims(jg.SigningMethodHS256, jg.MapClaims{
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"iss":       issArangod,
 		"server_id": "foo",
 	})
@@ -89,7 +90,7 @@ func AddArangoSyncJwtHeader(req *http.Request, jwtSecret string) error {
 	}
 	// Create a new token object, specifying signing method and the claims
 	// you would like it to contain.
-	token := jg.NewWithClaims(jg.SigningMethodHS256, jg.MapClaims{
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"iss":       issArangoSync,
 		"server_id": "foo",
 	})
@@ -124,11 +125,11 @@ func VerifyArangoSyncJwtHeader(req *http.Request, jwtSecret string) error {
 	}
 	tokenStr := strings.TrimSpace(authHdr[len(prefix):])
 	// Parse token
-	claims := jg.MapClaims{
+	claims := jwt.MapClaims{
 		"iss":       issArangoSync,
 		"server_id": "foo",
 	}
-	_, err := jg.ParseWithClaims(tokenStr, claims, func(*jg.Token) (interface{}, error) { return []byte(jwtSecret), nil })
+	_, err := jwt.ParseWithClaims(tokenStr, claims, func(*jwt.Token) (interface{}, error) { return []byte(jwtSecret), nil })
 	if err != nil {
 		return maskAny(err)
 	}
