@@ -22,10 +22,37 @@
 // you entered into with ArangoDB GmbH.
 //
 
-package jwt
+package trigger
 
-import "github.com/pkg/errors"
+import "sync"
 
-var (
-	maskAny = errors.WithStack
-)
+// Condition is a synchronization utility used to wait until someone sets it.
+// Once set, it cannot be reset.
+type Condition struct {
+	mu   sync.Mutex
+	cond *sync.Cond
+	set  bool
+}
+
+// Set the condition to true.
+func (c *Condition) Set() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.set = true
+	if c.cond != nil {
+		c.cond.Broadcast()
+	}
+}
+
+// Wait blocks until the condition is set.
+func (c *Condition) Wait() {
+	c.mu.Lock()
+	for !c.set {
+		if c.cond == nil {
+			c.cond = sync.NewCond(&c.mu)
+		}
+		c.cond.Wait()
+	}
+	c.mu.Unlock()
+}

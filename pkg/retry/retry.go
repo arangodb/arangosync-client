@@ -21,8 +21,6 @@
 // and shall use it only in accordance with the terms of the license agreement
 // you entered into with ArangoDB GmbH.
 //
-// Author Ewout Prangsma
-//
 
 package retry
 
@@ -30,7 +28,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/cenkalti/backoff"
+	"github.com/cenkalti/backoff/v4"
 	"github.com/pkg/errors"
 )
 
@@ -118,6 +116,9 @@ func Retry(op func() error, timeout time.Duration) error {
 	return retry(nil, op, timeout)
 }
 
+// Func is a function to be performed with retry logic.
+type Func func(ctx context.Context) error
+
 // RetryWithContext retries the given operation until it succeeds,
 // has a permanent failure or times out.
 // The timeout is the minimum between the timeout of the context and the given timeout.
@@ -125,7 +126,7 @@ func Retry(op func() error, timeout time.Duration) error {
 // The percentage is calculated from the given minimum number of attempts.
 // If the given minimum number of attempts is 3, the timeout of each `op` call if the overall timeout / 3.
 // The default minimum number of attempts is 2.
-func RetryWithContext(ctx context.Context, op func(ctx context.Context) error, timeout time.Duration, minAttempts ...int) error {
+func RetryWithContext(ctx context.Context, op Func, timeout time.Duration, minAttempts ...int) error {
 	deadline, ok := ctx.Deadline()
 	if ok {
 		ctxTimeout := time.Until(deadline)
@@ -138,9 +139,9 @@ func RetryWithContext(ctx context.Context, op func(ctx context.Context) error, t
 		divider = minAttempts[0]
 	}
 	ctxOp := func() error {
-		lctx, cancel := context.WithTimeout(ctx, timeout/time.Duration(divider))
+		ctxInner, cancel := context.WithTimeout(ctx, timeout/time.Duration(divider))
 		defer cancel()
-		if err := op(lctx); err != nil {
+		if err := op(ctxInner); err != nil {
 			return maskAny(err)
 		}
 		return nil

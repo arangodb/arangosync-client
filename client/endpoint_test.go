@@ -1,5 +1,5 @@
 //
-// Copyright 2017 ArangoDB GmbH, Cologne, Germany
+// Copyright 2017-2021 ArangoDB GmbH, Cologne, Germany
 //
 // The Programs (which include both the software and documentation) contain
 // proprietary information of ArangoDB GmbH; they are provided under a license
@@ -21,12 +21,17 @@
 // and shall use it only in accordance with the terms of the license agreement
 // you entered into with ArangoDB GmbH.
 //
-// Author Ewout Prangsma
-//
 
 package client
 
-import "testing"
+import (
+	"errors"
+	"net/url"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
 
 func TestEndpointContains(t *testing.T) {
 	ep := Endpoint{"http://a", "http://b", "http://c"}
@@ -59,11 +64,11 @@ func TestEndpointIsEmpty(t *testing.T) {
 
 func TestEndpointEquals(t *testing.T) {
 	expectEqual := []Endpoint{
-		Endpoint{}, Endpoint{},
-		Endpoint{}, nil,
-		Endpoint{"http://a"}, Endpoint{"http://a"},
-		Endpoint{"http://a", "http://b"}, Endpoint{"http://b", "http://a"},
-		Endpoint{"http://foo:8529"}, Endpoint{"http://foo:8529/"},
+		{}, {},
+		{}, nil,
+		{"http://a"}, {"http://a"},
+		{"http://a", "http://b"}, {"http://b", "http://a"},
+		{"http://foo:8529"}, {"http://foo:8529/"},
 	}
 	for i := 0; i < len(expectEqual); i += 2 {
 		epa := expectEqual[i]
@@ -77,11 +82,11 @@ func TestEndpointEquals(t *testing.T) {
 	}
 
 	expectNotEqual := []Endpoint{
-		Endpoint{"http://a"}, Endpoint{},
-		Endpoint{"http://z"}, nil,
-		Endpoint{"http://aa"}, Endpoint{"http://a"},
-		Endpoint{"http://a:100"}, Endpoint{"http://a:200"},
-		Endpoint{"http://a", "http://b", "http://c"}, Endpoint{"http://b", "http://a"},
+		{"http://a"}, {},
+		{"http://z"}, nil,
+		{"http://aa"}, {"http://a"},
+		{"http://a:100"}, {"http://a:200"},
+		{"http://a", "http://b", "http://c"}, {"http://b", "http://a"},
 	}
 	for i := 0; i < len(expectNotEqual); i += 2 {
 		epa := expectNotEqual[i]
@@ -97,9 +102,9 @@ func TestEndpointEquals(t *testing.T) {
 
 func TestEndpointClone(t *testing.T) {
 	tests := []Endpoint{
-		Endpoint{},
-		Endpoint{"http://a"},
-		Endpoint{"http://a", "http://b"},
+		{},
+		{"http://a"},
+		{"http://a", "http://b"},
 	}
 	for _, orig := range tests {
 		c := orig.Clone()
@@ -117,11 +122,11 @@ func TestEndpointClone(t *testing.T) {
 
 func TestEndpointIntersection(t *testing.T) {
 	expectIntersection := []Endpoint{
-		Endpoint{"http://a"}, Endpoint{"http://a"},
-		Endpoint{"http://a"}, Endpoint{"http://a", "http://b"},
-		Endpoint{"http://a"}, Endpoint{"http://b", "http://a"},
-		Endpoint{"http://a", "http://b"}, Endpoint{"http://b", "http://foo27"},
-		Endpoint{"http://foo:8529"}, Endpoint{"http://foo:8529/"},
+		{"http://a"}, {"http://a"},
+		{"http://a"}, {"http://a", "http://b"},
+		{"http://a"}, {"http://b", "http://a"},
+		{"http://a", "http://b"}, {"http://b", "http://foo27"},
+		{"http://foo:8529"}, {"http://foo:8529/"},
 	}
 	for i := 0; i < len(expectIntersection); i += 2 {
 		epa := expectIntersection[i]
@@ -135,10 +140,10 @@ func TestEndpointIntersection(t *testing.T) {
 	}
 
 	expectNoIntersection := []Endpoint{
-		Endpoint{"http://a"}, Endpoint{},
-		Endpoint{"http://z"}, nil,
-		Endpoint{"http://aa"}, Endpoint{"http://a"},
-		Endpoint{"http://a", "http://b", "http://c"}, Endpoint{"http://e", "http://f"},
+		{"http://a"}, {},
+		{"http://z"}, nil,
+		{"http://aa"}, {"http://a"},
+		{"http://a", "http://b", "http://c"}, {"http://e", "http://f"},
 	}
 	for i := 0; i < len(expectNoIntersection); i += 2 {
 		epa := expectNoIntersection[i]
@@ -154,9 +159,9 @@ func TestEndpointIntersection(t *testing.T) {
 
 func TestEndpointValidate(t *testing.T) {
 	validTests := []Endpoint{
-		Endpoint{},
-		Endpoint{"http://a"},
-		Endpoint{"http://a", "http://b"},
+		{},
+		{"http://a"},
+		{"http://a", "http://b"},
 	}
 	for _, x := range validTests {
 		if err := x.Validate(); err != nil {
@@ -164,11 +169,11 @@ func TestEndpointValidate(t *testing.T) {
 		}
 	}
 	invalidTests := []Endpoint{
-		Endpoint{":http::foo"},
-		Endpoint{"http/a"},
-		Endpoint{"http??"},
-		Endpoint{"http:/"},
-		Endpoint{"http:/foo"},
+		{":http::foo"},
+		{"http/a"},
+		{"http??"},
+		{"http:/"},
+		{"http:/foo"},
 	}
 	for _, x := range invalidTests {
 		if err := x.Validate(); err == nil {
@@ -195,11 +200,11 @@ func TestEndpointURLs(t *testing.T) {
 
 func TestEndpointMerge(t *testing.T) {
 	tests := []Endpoint{
-		Endpoint{"http://a"}, Endpoint{}, Endpoint{"http://a"},
-		Endpoint{"http://z"}, nil, Endpoint{"http://z"},
-		Endpoint{"http://aa"}, Endpoint{"http://a"}, Endpoint{"http://aa", "http://a"},
-		Endpoint{"http://a", "http://b", "http://c"}, Endpoint{"http://e", "http://f"}, Endpoint{"http://a", "http://b", "http://c", "http://e", "http://f"},
-		Endpoint{"http://a", "http://b", "http://c"}, Endpoint{"http://a", "http://f"}, Endpoint{"http://a", "http://b", "http://c", "http://f"},
+		{"http://a"}, {}, {"http://a"},
+		{"http://z"}, nil, {"http://z"},
+		{"http://aa"}, {"http://a"}, {"http://aa", "http://a"},
+		{"http://a", "http://b", "http://c"}, {"http://e", "http://f"}, {"http://a", "http://b", "http://c", "http://e", "http://f"},
+		{"http://a", "http://b", "http://c"}, {"http://a", "http://f"}, {"http://a", "http://b", "http://c", "http://f"},
 	}
 	for i := 0; i < len(tests); i += 3 {
 		epa := tests[i]
@@ -209,5 +214,113 @@ func TestEndpointMerge(t *testing.T) {
 		if !result.Equals(expected) {
 			t.Errorf("Expected merge of endpoints %v & %v to be %v, but got %v", epa, epb, expected, result)
 		}
+	}
+}
+
+func TestEndpoint_EqualsOrder(t *testing.T) {
+	tests := map[string]struct {
+		source Endpoint
+		target Endpoint
+		want   bool
+	}{
+		"nil source to and nil target": {
+			want: true,
+		},
+		"nil source to and not nil target": {
+			target: Endpoint{"1"},
+		},
+		"The source and target are the same": {
+			source: Endpoint{"1", "2"},
+			target: Endpoint{"1", "2"},
+			want:   true,
+		},
+		"The order of the source and target is not the same": {
+			source: Endpoint{"2", "1"},
+			target: Endpoint{"1", "2"},
+		},
+		"The number of endpoints of the source and target is not the same": {
+			source: Endpoint{"1", "2", "3"},
+			target: Endpoint{"1", "2"},
+		},
+	}
+
+	for testName, tt := range tests {
+		t.Run(testName, func(t *testing.T) {
+			got := tt.source.EqualsOrder(tt.target)
+			assert.Equalf(t, tt.want, got, "")
+		})
+	}
+}
+
+func TestParseEndpoint(t *testing.T) {
+	type args struct {
+		endpoint      string
+		fixupEndpoint bool
+	}
+	tests := map[string]struct {
+		args    args
+		want    *url.URL
+		wantErr error
+	}{
+		"test": {
+			args: args{
+				endpoint: "",
+			},
+			wantErr: ErrEmptyValue,
+		},
+		"empty hostname": {
+			args: args{
+				endpoint: "http://:8529",
+			},
+			wantErr: errors.New("the endpoint \"http://:8529\" is missing a hostname"),
+		},
+		"valid hostname": {
+			args: args{
+				endpoint: "http://localhost:8529",
+			},
+			want: &url.URL{
+				Scheme: "http",
+				Host:   "localhost:8529",
+			},
+		},
+		"fixup endpoint scheme": {
+			args: args{
+				endpoint:      "ssl://localhost:8529",
+				fixupEndpoint: true,
+			},
+			want: &url.URL{
+				Scheme: "https",
+				Host:   "localhost:8529",
+			},
+		},
+		"normalized endpoint": {
+			args: args{
+				endpoint: "postgres://example.com:5432/db?sslmode=require",
+			},
+			want: &url.URL{
+				Scheme: "postgres",
+				Host:   "example.com:5432",
+			},
+			wantErr: nil,
+		},
+		"invalid endpoint": {
+			args: args{
+				endpoint: "http://test.com/Segment%%2815197306101420000%29.ts",
+			},
+			wantErr: errors.New("invalid URL escape \"%%2\""),
+		},
+	}
+
+	for testName, testCase := range tests {
+		t.Run(testName, func(t *testing.T) {
+			got, err := ParseEndpoint(testCase.args.endpoint, testCase.args.fixupEndpoint)
+			if testCase.wantErr != nil {
+				require.Error(t, testCase.wantErr, err)
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, testCase.want, got)
+		})
 	}
 }

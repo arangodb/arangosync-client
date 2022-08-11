@@ -1,5 +1,5 @@
 //
-// Copyright 2017 ArangoDB GmbH, Cologne, Germany
+// Copyright 2017-2021 ArangoDB GmbH, Cologne, Germany
 //
 // The Programs (which include both the software and documentation) contain
 // proprietary information of ArangoDB GmbH; they are provided under a license
@@ -21,8 +21,6 @@
 // and shall use it only in accordance with the terms of the license agreement
 // you entered into with ArangoDB GmbH.
 //
-// Author Ewout Prangsma
-//
 
 package client
 
@@ -30,8 +28,11 @@ import (
 	"context"
 	"time"
 
-	"github.com/arangodb/arangosync-client/tasks"
 	"github.com/pkg/errors"
+
+	"github.com/arangodb/go-driver"
+
+	"github.com/arangodb/arangosync-client/tasks"
 )
 
 // API of a sync master/worker
@@ -49,9 +50,6 @@ type API interface {
 	Master() MasterAPI
 	// Returns the worker API (only valid when Role returns worker)
 	Worker() WorkerAPI
-
-	// Set the ID of the client that is making requests.
-	SetClientID(id string)
 	// SetShared marks the client as shared.
 	// Closing a shared client will not close all idle connections.
 	SetShared()
@@ -78,11 +76,32 @@ type MasterAPI interface {
 	Synchronize(ctx context.Context, input SynchronizationRequest) error
 	// Configure the master to stop & completely cancel the current synchronization of the
 	// local cluster from a remote cluster.
+	// If this is an active synchronization barrier, this is automatically canceled.
 	// Errors:
 	// - RequestTimeoutError when input.WaitTimeout is non-zero and the inactive stage is not reached in time.
 	CancelSynchronization(ctx context.Context, input CancelSynchronizationRequest) (CancelSynchronizationResponse, error)
+	// GetChecksumShardSynchronization gets checksums for the specific shard.
+	GetChecksumShardSynchronization(ctx context.Context, dbName, colName string, shardIndex int,
+		options ChecksumSynchronizationRequestOptions) (ChecksumSynchronizationResponse, error)
+	// GetDataCentersInfo return information from each data center.
+	GetDataCentersInfo(ctx context.Context) (DataCentersResponse, error)
+	// CreateSynchronizationBarrier creates a barrier in the current synchronization
+	// that stops the source cluster from accepting any modifications
+	// such that the destination cluster can catch up.
+	CreateSynchronizationBarrier(ctx context.Context) error
+	// CancelSynchronizationBarrier removes the active barrier in the current synchronization
+	// that stops the source cluster from accepting any modifications
+	// such that the destination cluster can catch up.
+	// If there is not active barrier, this function returns without an error.
+	CancelSynchronizationBarrier(ctx context.Context) error
+	// GetSynchronizationBarrierStatus returns the status of the the active barrier
+	// in the current synchronization that stops the source cluster from accepting any modifications
+	// such that the destination cluster can catch up.
+	GetSynchronizationBarrierStatus(ctx context.Context) (SynchronizationBarrierStatus, error)
 	// Reset a failed shard synchronization.
 	ResetShardSynchronization(ctx context.Context, dbName, colName string, shardIndex int) error
+	// GetMessageTimeout gets current allowed time between messages in a task channel.
+	GetMessageTimeout(ctx context.Context) (MessageTimeoutInfo, error)
 	// Update the maximum allowed time between messages in a task channel.
 	SetMessageTimeout(ctx context.Context, timeout time.Duration) error
 	// Return a list of all known master endpoints of this datacenter.
@@ -140,20 +159,20 @@ type ChannelPrefixInfo struct {
 
 // SyncInfo holds the JSON info returned from `GET /_api/sync`
 type SyncInfo struct {
-	Source         Endpoint           `json:"source"`                   // Endpoint of sync master on remote cluster
-	Status         SyncStatus         `json:"status"`                   // Overall status of (incoming) synchronization
-	Shards         []ShardSyncInfo    `json:"shards,omitempty"`         // Status of incoming synchronization per shard
-	Outgoing       []OutgoingSyncInfo `json:"outgoing,omitempty"`       // Status of outgoing synchronization
-	MessageTimeout time.Duration      `json:"messageTimeout,omitempty"` // Maximum time between messages in a task channel
+	Source   Endpoint           `json:"source"`             // Endpoint of sync master on remote cluster
+	Status   SyncStatus         `json:"status"`             // Overall status of (incoming) synchronization
+	Shards   []ShardSyncInfo    `json:"shards,omitempty"`   // Status of incoming synchronization per shard
+	Outgoing []OutgoingSyncInfo `json:"outgoing,omitempty"` // Status of outgoing synchronization
 }
 
 // OutgoingSyncInfo holds JSON info returned as part of `GET /_api/sync`
 // regarding a specific target for outgoing synchronization data.
 type OutgoingSyncInfo struct {
-	ID       string          `json:"id"`               // ID of sync master to which data is being send
-	Endpoint Endpoint        `json:"endpoint"`         // Endpoint of sync masters to which data is being send
-	Status   SyncStatus      `json:"status"`           // Overall status for this outgoing target
-	Shards   []ShardSyncInfo `json:"shards,omitempty"` // Status of outgoing synchronization per shard for this target
+	ID            string          `json:"id"`                       // ID of sync master to which data is being send
+	Endpoint      Endpoint        `json:"endpoint"`                 // Endpoint of sync masters to which data is being send
+	Status        SyncStatus      `json:"status"`                   // Overall status for this outgoing target
+	Shards        []ShardSyncInfo `json:"shards,omitempty"`         // Status of outgoing synchronization per shard for this target
+	ActiveBarrier bool            `json:"active_barrier,omitempty"` // Set if this outgoing target has requested a synchronization barrier
 }
 
 // ShardSyncInfo holds JSON info returned as part of `GET /_api/sync`
@@ -169,6 +188,7 @@ type ShardSyncInfo struct {
 	LastDataChange        time.Time     `json:"last_data_change"`         // Time of last message that resulted in a data change, received by the task handling this shard
 	LastShardMasterChange time.Time     `json:"last_shard_master_change"` // Time of when we last had a change in the status of the shard master
 	ShardMasterKnown      bool          `json:"shard_master_known"`       // Is the shard master known?
+	InSync                bool          `json:"in_sync,omitempty"`        // Set if the shard is known to be in-sync. Requires R/O of source cluster.
 }
 
 type SyncStatus string
@@ -306,6 +326,10 @@ type CancelSynchronizationRequest struct {
 	// the source master to notify it about cancelling the synchronization.
 	// This fields is only used when Force is true.
 	ForceTimeout time.Duration `json:"force_timeout,omitempty"`
+	// TargetServerMode is the final target server mode when synchronization is stopped.
+	TargetServerMode driver.ServerMode `json:"target_server_mode,omitempty"`
+	// SourceServerMode is the final source server mode when synchronization is stopped.
+	SourceServerMode driver.ServerMode `json:"source_server_mode,omitempty"`
 }
 
 type CancelSynchronizationResponse struct {
@@ -320,7 +344,8 @@ type CancelSynchronizationResponse struct {
 	ClusterID string `json:"cluster_id,omitempty"`
 }
 
-type SetMessageTimeoutRequest struct {
+// MessageTimeoutInfo holds the timeout message info.
+type MessageTimeoutInfo struct {
 	MessageTimeout time.Duration `json:"messageTimeout"`
 }
 
@@ -330,4 +355,169 @@ type EndpointsResponse struct {
 
 type MastersResponse struct {
 	Masters []MasterInfo `json:"masters"`
+}
+
+// SynchronizationBarrierStatus contains the status of the active synchronization barrier.
+type SynchronizationBarrierStatus struct {
+	// InSyncShards holds the number of shards that have reached the in-sync state.
+	InSyncShards int `json:"in_sync_shards,omitempty"`
+	// NotInSyncShards holds the number of shards that have not yet reached the in-sync state.
+	NotInSyncShards int `json:"not_in_sync_shards,omitempty"`
+	// SourceServerReadonly describes if the source DC is in read-only mode.
+	SourceServerReadonly bool
+}
+
+// ShardChecksum contains a checksum for the shard.
+type ShardChecksum struct {
+	Checksum string `json:"checksum"`
+}
+
+// ShardsChecksum describes checksums for shards within one collection.
+type ShardsChecksum struct {
+	Shards map[int][]ShardChecksum `json:"shards"`
+}
+
+// CollectionsChecksum describes checksums for collections within one database
+type CollectionsChecksum struct {
+	Collections map[string]ShardsChecksum `json:"collections"`
+}
+
+// ChecksumSynchronizationResponse describes checksums for all databases.
+type ChecksumSynchronizationResponse struct {
+	Databases map[string]CollectionsChecksum `json:"databases"`
+}
+
+// ChecksumSynchronizationRequestOptions describes how checksums should be fetched.
+type ChecksumSynchronizationRequestOptions struct {
+	Timeout time.Duration `json:"timeout"`
+}
+
+// AddChecksums adds new checksum for the specific shard.
+func (c *ChecksumSynchronizationResponse) AddChecksums(dbName, colName string, shardIndex int,
+	checksum ...ShardChecksum) {
+
+	if len(checksum) == 0 {
+		return
+	}
+
+	if c.Databases == nil {
+		c.Databases = make(map[string]CollectionsChecksum)
+	}
+
+	if _, ok := c.Databases[dbName]; !ok {
+		collections := make(map[string]ShardsChecksum)
+
+		c.Databases[dbName] = CollectionsChecksum{
+			Collections: collections,
+		}
+	}
+
+	if _, ok := c.Databases[dbName].Collections[colName]; !ok {
+		shards := make(map[int][]ShardChecksum)
+
+		c.Databases[dbName].Collections[colName] = ShardsChecksum{
+			Shards: shards,
+		}
+	}
+
+	shards := c.Databases[dbName].Collections[colName].Shards[shardIndex]
+	shards = append(shards, checksum...)
+	c.Databases[dbName].Collections[colName].Shards[shardIndex] = shards
+}
+
+// Merge merges checksums fot the same shard.
+func (c *ChecksumSynchronizationResponse) Merge(from ChecksumSynchronizationResponse) {
+	for dbname, database := range from.Databases {
+		for colName, collections := range database.Collections {
+			for shardIndex, checksums := range collections.Shards {
+				c.AddChecksums(dbname, colName, shardIndex, checksums...)
+			}
+		}
+	}
+}
+
+// GetChecksums gets checksums for the specific shard.
+func (c *ChecksumSynchronizationResponse) GetChecksums(dbName, col string, shardIndex int) []ShardChecksum {
+	if c.Databases == nil {
+		return nil
+	}
+
+	database, ok := c.Databases[dbName]
+	if !ok {
+		return nil
+	}
+
+	if database.Collections == nil {
+		return nil
+	}
+
+	collection, ok1 := database.Collections[col]
+	if !ok1 {
+		return nil
+	}
+
+	if _, ok := collection.Shards[shardIndex]; !ok {
+		return nil
+	}
+
+	return collection.Shards[shardIndex]
+}
+
+// IsTheSame checks whether a shard contains the same checksums on each data center.
+func (c *ChecksumSynchronizationResponse) IsTheSame(dbname, col string, shardIndex int) bool {
+	checksums := c.GetChecksums(dbname, col, shardIndex)
+
+	for i := range checksums {
+		if checksums[i].Checksum != checksums[0].Checksum {
+			// everything should equal to the first element
+			return false
+		}
+	}
+
+	return true
+}
+
+// DataCenterShardResponse stores information about a shard in the data center.
+type DataCenterShardResponse struct {
+	ID string `json:"ID"`
+}
+
+// DataCenterCollectionResponse stores information about a collection in the data center.
+type DataCenterCollectionResponse struct {
+	Shards map[int]DataCenterShardResponse `json:"shards,omitempty"`
+}
+
+// DataCenterDatabaseResponse stores information about a database in the data center.
+type DataCenterDatabaseResponse struct {
+	Collections map[string]DataCenterCollectionResponse `json:"collections,omitempty"`
+	Err         string                                  `json:"error"`
+}
+
+// DataCenterResponse stores information about databases in the data center.
+type DataCenterResponse struct {
+	Databases map[string]DataCenterDatabaseResponse `json:"databases,omitempty"`
+	ID        string                                `json:"id"`
+}
+
+// DataCentersResponse stores information about databases in many data centers.
+type DataCentersResponse struct {
+	DataCenters []DataCenterResponse `json:"datacenters,omitempty"`
+}
+
+// IsInactive checks whether the replication is turned off.
+// It does not matter if the sync info comes from source, target or proxy data center.
+func (s SyncInfo) IsInactive() bool {
+	if len(s.Outgoing) > 0 {
+		// There are some outgoing data, so definitely it is not inactive.
+		return false
+	}
+
+	// From here on it is known that it is not source or proxy data center.
+	if len(s.Shards) > 0 {
+		// There are some incoming data, so definitely it is not inactive.
+		return false
+	}
+
+	// The below status relates only to incoming data cluster.
+	return s.Status.Normalize() == SyncStatusInactive
 }

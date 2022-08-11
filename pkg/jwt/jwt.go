@@ -21,9 +21,6 @@
 // and shall use it only in accordance with the terms of the license agreement
 // you entered into with ArangoDB GmbH.
 //
-// Author Ewout Prangsma
-// Author Tomasz Mielech
-//
 
 package jwt
 

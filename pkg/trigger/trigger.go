@@ -22,10 +22,44 @@
 // you entered into with ArangoDB GmbH.
 //
 
-package jwt
+package trigger
 
-import "github.com/pkg/errors"
+import "sync"
 
-var (
-	maskAny = errors.WithStack
-)
+// Trigger is a synchronization utility used to wait (in a select statement)
+// until someone triggers it.
+type Trigger struct {
+	mu              sync.Mutex
+	done            chan struct{}
+	pendingTriggers int
+}
+
+// Done returns the channel to use in a select case.
+// This channel is closed when someone calls Trigger.
+func (t *Trigger) Done() <-chan struct{} {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if t.done == nil {
+		t.done = make(chan struct{})
+	}
+	if t.pendingTriggers > 0 {
+		t.pendingTriggers = 0
+		d := t.done
+		close(t.done)
+		t.done = nil
+		return d
+	}
+	return t.done
+}
+
+// Trigger closes any Done channel.
+func (t *Trigger) Trigger() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.pendingTriggers++
+	if t.done != nil {
+		close(t.done)
+		t.done = nil
+	}
+}

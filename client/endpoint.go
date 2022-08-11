@@ -1,5 +1,5 @@
 //
-// Copyright 2017 ArangoDB GmbH, Cologne, Germany
+// Copyright 2017-2022 ArangoDB GmbH, Cologne, Germany
 //
 // The Programs (which include both the software and documentation) contain
 // proprietary information of ArangoDB GmbH; they are provided under a license
@@ -21,8 +21,6 @@
 // and shall use it only in accordance with the terms of the license agreement
 // you entered into with ArangoDB GmbH.
 //
-// Author Ewout Prangsma
-//
 
 package client
 
@@ -30,10 +28,71 @@ import (
 	"fmt"
 	"net/url"
 	"sort"
+
+	"github.com/pkg/errors"
+
+	"github.com/arangodb/go-driver/util"
 )
 
-// Endpoint is a list of URL's that are considered to be off the same service.
+var ErrEmptyValue = errors.New("empty value")
+
+// Endpoint is a list of URLs that are considered to be of the same service.
 type Endpoint []string
+
+// EndpointsCreator describes how endpoints are used for.
+type EndpointsCreator interface {
+	// GetEndpoints returns endpoints for the connection.
+	GetEndpoints() Endpoint
+	// IsInternal returns true if endpoints are in the same datacenter.
+	IsInternal() bool
+}
+
+type endpoints struct {
+	Endpoint
+}
+
+// GetEndpoints returns all endpoints for the connection.
+func (i endpoints) GetEndpoints() Endpoint {
+	return i.Endpoint
+}
+
+// InternalEndpoints describes endpoints to the internal datacenter.
+type InternalEndpoints struct {
+	endpoints
+}
+
+// ExternalEndpoints describes endpoints to the external datacenter.
+type ExternalEndpoints struct {
+	endpoints
+}
+
+// IsInternal return true for the internal endpoints.
+func (i InternalEndpoints) IsInternal() bool {
+	return true
+}
+
+// IsInternal return false for the external endpoints.
+func (i ExternalEndpoints) IsInternal() bool {
+	return false
+}
+
+// NewInternalEndpoints creates a new list of endpoints to the internal DC's arangosync server (master, worker).
+func NewInternalEndpoints(e Endpoint) *InternalEndpoints {
+	return &InternalEndpoints{
+		endpoints: endpoints{
+			e,
+		},
+	}
+}
+
+// NewExternalEndpoints creates a new list of endpoints to the external DC's arangosync server (master, worker).
+func NewExternalEndpoints(e Endpoint) *ExternalEndpoints {
+	return &ExternalEndpoints{
+		endpoints{
+			e,
+		},
+	}
+}
 
 // Contains returns true when x is an element of ep.
 func (ep Endpoint) Contains(x string) bool {
@@ -87,6 +146,21 @@ func (ep Endpoint) Intersection(other Endpoint) Endpoint {
 	return result
 }
 
+// EqualsOrder returns true if endpoints are the same including order.
+func (ep Endpoint) EqualsOrder(other Endpoint) bool {
+	if len(ep) != len(other) {
+		return false
+	}
+
+	for i := range ep {
+		if ep[i] != other[i] {
+			return false
+		}
+	}
+
+	return true
+}
+
 // Validate checks all URL's, returning the first error found.
 func (ep Endpoint) Validate() error {
 	for _, x := range ep {
@@ -105,7 +179,7 @@ func (ep Endpoint) URLs() ([]url.URL, error) {
 	for _, x := range ep {
 		u, err := url.Parse(x)
 		if err != nil {
-			return nil, maskAny(err)
+			return nil, errors.Wrapf(err, "can not parse the URL %s", x)
 		}
 		u.Path = ""
 		list = append(list, *u)
@@ -145,4 +219,36 @@ func normalizeSingleEndpoint(ep string) string {
 		return u.String()
 	}
 	return ep
+}
+
+// ParseEndpoint returns parsed URL if hostname is set.
+// The URL is normalized.
+func ParseEndpoint(endpoint string, fixupEndpoint bool) (*url.URL, error) {
+	if len(endpoint) == 0 {
+		return nil, ErrEmptyValue
+	}
+
+	if fixupEndpoint {
+		endpoint = util.FixupEndpointURLScheme(endpoint)
+	}
+
+	url, err := url.Parse(endpoint)
+	if err == nil && len(url.Hostname()) > 0 {
+		NormalizeEndpoint(url)
+
+		return url, nil
+	}
+
+	if err != nil {
+		return nil, errors.Wrapf(err, "the endpoint \"%s\" is invalid", endpoint)
+	}
+
+	return nil, fmt.Errorf("the endpoint \"%s\" is missing a hostname", endpoint)
+}
+
+// NormalizeEndpoint cuts off everything what is after the host:port
+func NormalizeEndpoint(url *url.URL) {
+	if url != nil {
+		url.Path, url.RawQuery, url.Fragment, url.ForceQuery = "", "", "", false
+	}
 }

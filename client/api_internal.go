@@ -1,5 +1,5 @@
 //
-// Copyright 2017 ArangoDB GmbH, Cologne, Germany
+// Copyright 2020-2022 ArangoDB GmbH, Cologne, Germany
 //
 // The Programs (which include both the software and documentation) contain
 // proprietary information of ArangoDB GmbH; they are provided under a license
@@ -21,8 +21,6 @@
 // and shall use it only in accordance with the terms of the license agreement
 // you entered into with ArangoDB GmbH.
 //
-// Author Ewout Prangsma
-//
 
 package client
 
@@ -32,6 +30,8 @@ import (
 	"fmt"
 	"math"
 	"time"
+
+	"github.com/arangodb/go-driver"
 
 	"github.com/arangodb/arangosync-client/tasks"
 )
@@ -46,8 +46,8 @@ type InternalMasterAPI interface {
 	RegisteredWorkers(ctx context.Context) ([]WorkerRegistration, error)
 	// Return info about a specific worker
 	RegisteredWorker(ctx context.Context, id string) (WorkerRegistration, error)
-	// Register (or update registration of) a worker
-	RegisterWorker(ctx context.Context, endpoint, token, hostID string) (WorkerRegistrationResponse, error)
+	// RegisterWorker registers or updates a worker.
+	RegisterWorker(ctx context.Context, endpoint, token, hostID, dbServerAffinity string) (WorkerRegistrationResponse, error)
 	// Remove the registration of a worker
 	UnregisterWorker(ctx context.Context, id string) error
 	// Get info about a specific task
@@ -84,24 +84,30 @@ type InternalMasterAPI interface {
 
 	// Master -> Master
 
-	// Start a task that sends inventory data to a receiving remote cluster.
+	// OutgoingSynchronization starts a task that sends inventory data to a receiving remote cluster.
 	OutgoingSynchronization(ctx context.Context, input OutgoingSynchronizationRequest) (OutgoingSynchronizationResponse, error)
-	// Cancel sending synchronization data to the remote cluster with given ID.
-	CancelOutgoingSynchronization(ctx context.Context, remoteID string) error
-	// Create tasks to send synchronization data of a shard in the given db+col to a remote cluster.
+	// CancelOutgoingSynchronization cancels synchronization data to the remote cluster with given ID.
+	CancelOutgoingSynchronization(ctx context.Context, remoteID string, serverMode driver.ServerMode) error
+	// OutgoingSynchronizeShard creates task to send synchronization data of a shard in the given db+col to a remote cluster.
 	OutgoingSynchronizeShard(ctx context.Context, remoteID, dbName, colName string, shardIndex int, input OutgoingSynchronizeShardRequest) error
-	// Stop tasks to send synchronization data of a shard in the given db+col to a remote cluster.
+	// CancelOutgoingSynchronizeShard stops task to send synchronization data of a shard in the given db+col to a remote cluster.
 	CancelOutgoingSynchronizeShard(ctx context.Context, remoteID, dbName, colName string, shardIndex int) error
-	// Report status of the synchronization of a shard back to the master.
+	// OutgoingSynchronizeShardStatus reports status of the synchronization of a shard back to the master.
 	OutgoingSynchronizeShardStatus(ctx context.Context, entries []SynchronizationShardStatusRequestEntry) error
-	// Reset a failed shard synchronization.
+	// OutgoingResetShardSynchronization removes and creates new task for the given shard data.
 	OutgoingResetShardSynchronization(ctx context.Context, remoteID, dbName, colName string, shardIndex int, newControlChannel, newDataChannel string) error
-
-	// Get a prefix for names of channels that contain message
-	// going to this master.
+	// CreateOutgoingSynchronizationBarrier creates a barrier in the outgoing
+	// synchronization to the remote cluster with the given ID.
+	CreateOutgoingSynchronizationBarrier(ctx context.Context, remoteID string) error
+	// CancelOutgoingSynchronizationBarrier removes the active barrier in the
+	// current synchronization to the remote cluster with given ID.
+	CancelOutgoingSynchronizationBarrier(ctx context.Context, remoteID string) error
+	// ChannelPrefix gets a prefix for names of channels that contain message going to this master.
 	ChannelPrefix(ctx context.Context) (string, error)
-	// Get the local message queue configuration.
-	GetMessageQueueConfig(ctx context.Context) (MessageQueueConfig, error)
+	// CreateMessageQueueConfig creates an MQ configuration.
+	CreateMessageQueueConfig(ctx context.Context) (MessageQueueConfigExt, error)
+	// UpdateMessageQueue updates an MQ configuration.
+	UpdateMessageQueue(ctx context.Context, input UpdateMQConfigRequest) error
 }
 
 // InternalWorkerAPI contains the internal API of the sync worker.
@@ -112,6 +118,8 @@ type InternalWorkerAPI interface {
 	// StopTask is called by the master to instruct the worker
 	// to stop all work on the given task.
 	StopTask(ctx context.Context, taskID string) error
+	// Configure is called by the master to instruct the worker that configuration has been changed.
+	Configure(ctx context.Context, JWTSecret string) error
 	// SetDirectMQTopicToken configures the token used to access messages of a given channel.
 	SetDirectMQTopicToken(ctx context.Context, channelName, token string, tokenTTL time.Duration) error
 	// Add entire direct MQ API
@@ -128,9 +136,15 @@ type InternalDirectMQAPI interface {
 
 // MessageQueueConfig contains all deployment configuration info for the local MQ.
 type MessageQueueConfig struct {
-	Type           string            `json:"type"`
-	Endpoints      []string          `json:"endpoints"`
+	Endpoints      Endpoint          `json:"endpoints"`
 	Authentication TLSAuthentication `json:"authentication"`
+}
+
+// MessageQueueConfigExt contains extended MQ config.
+type MessageQueueConfigExt struct {
+	MessageQueueConfig
+	// TokenTTL holds how long MQ config token is valid.
+	TokenTTL time.Duration `json:"token-ttl,omitempty"`
 }
 
 // Clone returns a deep copy of the given config
@@ -138,6 +152,12 @@ func (c MessageQueueConfig) Clone() MessageQueueConfig {
 	result := c
 	result.Endpoints = append([]string{}, c.Endpoints...)
 	return result
+}
+
+// Equals checks if the structures are the same.
+func (c MessageQueueConfig) Equals(other MessageQueueConfig) bool {
+	return c.Authentication.Equals(other.Authentication) &&
+		c.Endpoints.EqualsOrder(other.Endpoints)
 }
 
 // ConfigureWorkerRequest is the JSON body for the ConfigureWorker request.
@@ -155,7 +175,8 @@ type WorkerConfiguration struct {
 		// Minimum replication factor of new/modified collections
 		MinReplicationFactor int `json:"min-replication-factor,omitempty"`
 		// Maximum replication factor of new/modified collections
-		MaxReplicationFactor int `json:"max-replication-factor,omitempty"`
+		MaxReplicationFactor int  `json:"max-replication-factor,omitempty"`
+		ExcludeRootUser      bool `json:"exclude-root-user,omitempty"`
 	} `json:"cluster"`
 	HTTPServer struct {
 		Certificate string `json:"certificate"`
@@ -204,8 +225,10 @@ type WorkerRegistration struct {
 	ExpiresAt time.Time `json:"expiresAt"`
 	// ID of the worker when communicating with ArangoDB servers.
 	ServerID int64 `json:"serverID"`
-	// IF of the host the worker process is running on
+	// HostID is the host ID the worker process is running on. It can be empty.
 	HostID string `json:"host,omitempty"`
+	// DBServerAffinity indicates where (which DB server) the worker should follow the WAL.
+	DBServerAffinity string `json:"dbServerAffinity,omitempty"`
 }
 
 // Validate the given registration.
@@ -231,13 +254,19 @@ func (wr WorkerRegistration) IsExpired() bool {
 type WorkerRegistrationRequest struct {
 	Endpoint string `json:"endpoint"`
 	Token    string `json:"token,omitempty"`
-	HostID   string `json:host,omitempty"`
+	// HostID is the host ID the worker process is running on. It can be empty.
+	// Since version 2.6.0 it used to be invalid tag `json:host,omitempty"` (without `"` before `host`),
+	// so the field HostID was taken as a tag, and it must be used to keep backward compatibility.
+	HostID string `json:"HostID,omitempty"`
+	// DBServerAffinity describes which DB server is accessible from the worker.
+	DBServerAffinity string `json:"dbServerAffinity,omitempty"`
 }
 
 type WorkerRegistrationResponse struct {
 	WorkerRegistration
 	// Maximum time between message in a task channel.
-	MessageTimeout time.Duration `json:"messageTimeout,omitempty"`
+	MessageTimeout  time.Duration `json:"messageTimeout,omitempty"`
+	ExpiresDuration time.Duration `json:"expiresDuration,omitempty"`
 }
 
 type StartTaskRequest struct {
@@ -247,18 +276,17 @@ type StartTaskRequest struct {
 	RemoteMessageQueueConfig MessageQueueConfig `json:"remote-mq-config"`
 }
 
+type OutgoingChannels struct {
+	// Name of MQ topic to send inventory data to.
+	Inventory string `json:"inventory"`
+}
+
 // OutgoingSynchronizationRequest holds the master->master request
 // data for configuring an outgoing inventory stream.
 type OutgoingSynchronizationRequest struct {
-	// ID of remote cluster
-	ID string `json:"id"`
-	// Endpoints of sync masters of the remote (target) cluster
-	Target   Endpoint `json:"target"`
-	Channels struct {
-		// Name of MQ topic to send inventory data to.
-		Inventory string `json:"inventory"`
-	} `json:"channels"`
-	// MQ configuration of the remote (target) cluster
+	ID                 string             `json:"id"`       // ID of remote cluster
+	Target             Endpoint           `json:"target"`   // Endpoints of sync masters of the remote (target) cluster
+	Channels           OutgoingChannels   `json:"channels"` // MQ configuration of the remote (target) cluster
 	MessageQueueConfig MessageQueueConfig `json:"mq-config"`
 }
 
@@ -277,32 +305,32 @@ type OutgoingSynchronizationResponse struct {
 	MessageQueueConfig MessageQueueConfig `json:"mq-config"`
 }
 
+type Channels struct {
+	Control string `json:"control"` // Name of MQ topic to receive control messages on.
+	Data    string `json:"data"`    // Name of MQ topic to send data messages to.
+}
+
 // OutgoingSynchronizeShardRequest holds the master->master request
 // data for configuring an outgoing shard synchronization stream.
 type OutgoingSynchronizeShardRequest struct {
-	Channels struct {
-		// Name of MQ topic to receive control messages on.
-		Control string `json:"control"`
-		// Name of MQ topic to send data messages to.
-		Data string `json:"data"`
-	} `json:"channels"`
+	Channels Channels `json:"channels"`
 }
 
-// SynchronizationShardStatusRequest is the request body of a (Outgoing)SynchronizationShardStatus request.
+// SynchronizationShardStatusRequest is the request body of a (Outgoing)SynchronizationStatus request.
 type SynchronizationShardStatusRequest struct {
 	Entries []SynchronizationShardStatusRequestEntry `json:"entries"`
 }
 
 // SynchronizationShardStatusRequestEntry is a single entry in a SynchronizationShardStatusRequest
 type SynchronizationShardStatusRequestEntry struct {
-	RemoteID   string                     `json:"remoteID"`
-	Database   string                     `json:"database"`
-	Collection string                     `json:"collection"`
-	ShardIndex int                        `json:"shardIndex"`
-	Status     SynchronizationShardStatus `json:"status"`
+	RemoteID   string                `json:"remoteID"`
+	Database   string                `json:"database"`
+	Collection string                `json:"collection"`
+	ShardIndex int                   `json:"shardIndex"`
+	Status     SynchronizationStatus `json:"status"`
 }
 
-type SynchronizationShardStatus struct {
+type SynchronizationStatus struct {
 	// Current status
 	Status SyncStatus `json:"status"`
 	// Human readable status message
@@ -317,14 +345,17 @@ type SynchronizationShardStatus struct {
 	LastShardMasterChange time.Time `json:"last_shard_master_change"`
 	// Is the shard master known?
 	ShardMasterKnown bool `json:"shard_master_known"`
+	// Is the shard known to be in-sync?
+	// This requires the sending side to be in read-only mode.
+	InSync bool `json:"in_sync"`
 }
 
 // IsSame returns true when the Status & StatusMessage of both statuses
 // are equal and the Delay is very close.
-func (s SynchronizationShardStatus) IsSame(other SynchronizationShardStatus) bool {
+func (s SynchronizationStatus) IsSame(other SynchronizationStatus) bool {
 	if s.Status != other.Status || s.StatusMessage != other.StatusMessage ||
 		s.LastMessage != other.LastMessage || s.LastDataChange != other.LastDataChange ||
-		s.LastShardMasterChange != other.LastShardMasterChange || s.ShardMasterKnown != other.ShardMasterKnown {
+		s.LastShardMasterChange != other.LastShardMasterChange || s.ShardMasterKnown != other.ShardMasterKnown || s.InSync != other.InSync {
 		return false
 	}
 	return !IsSignificantDelayDiff(s.Delay, other.Delay)
@@ -431,6 +462,11 @@ type SetDirectMQTopicTokenRequest struct {
 	TokenTTL time.Duration `json:"token-ttl"`
 }
 
+// ConfigurationRequest is the JSON request body for changing configuration.
+type ConfigurationRequest struct {
+	JWTSecret string `json:"secret"` // JWT secret used to create token for authentication with the server.
+}
+
 // DirectMQMessage is a direct MQ message.
 type DirectMQMessage struct {
 	Offset  int64           `json:"offset"`
@@ -445,4 +481,15 @@ type GetDirectMQMessagesResponse struct {
 // CommitDirectMQMessageRequest is the JSON request body for CommitDirectMQMessage request.
 type CommitDirectMQMessageRequest struct {
 	Offset int64 `json:"offset"`
+}
+
+func (c Channels) IsEqual(compareTo Channels) bool {
+	return c.Data == compareTo.Data && c.Control == compareTo.Control
+}
+
+// UpdateMQConfigRequest describes what is required to update a message queue config.
+type UpdateMQConfigRequest struct {
+	ID       string        `json:"id"`        // ID of remote cluster.
+	Token    string        `json:"token"`     // A new token which should be updated remotely.
+	TokenTTL time.Duration `json:"token-ttl"` // TTL of the token.
 }

@@ -22,10 +22,47 @@
 // you entered into with ArangoDB GmbH.
 //
 
-package jwt
+package trigger
 
-import "github.com/pkg/errors"
+import "sync"
 
-var (
-	maskAny = errors.WithStack
-)
+// TriggerGroup is a set of Trigger objects, all sharing a single trigger,
+// but having individual Done() channels.
+type TriggerGroup struct {
+	mu       sync.Mutex
+	elements []*Trigger
+}
+
+// Add a Trigger element.
+func (g *TriggerGroup) Add() *Trigger {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	t := &Trigger{}
+	g.elements = append(g.elements, t)
+
+	return t
+}
+
+// Remove a Trigger element.
+func (g *TriggerGroup) Remove(t *Trigger) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	for i := range g.elements {
+		if g.elements[i] == t {
+			g.elements = append(g.elements[:i], g.elements[i+1:]...)
+			break
+		}
+	}
+}
+
+// Trigger all entries
+func (g *TriggerGroup) Trigger() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	for _, t := range g.elements {
+		t.Trigger()
+	}
+}
