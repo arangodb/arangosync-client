@@ -1,5 +1,5 @@
 //
-// Copyright 2017 ArangoDB GmbH, Cologne, Germany
+// Copyright 2017-2022 ArangoDB GmbH, Cologne, Germany
 //
 // The Programs (which include both the software and documentation) contain
 // proprietary information of ArangoDB GmbH; they are provided under a license
@@ -21,8 +21,6 @@
 // and shall use it only in accordance with the terms of the license agreement
 // you entered into with ArangoDB GmbH.
 //
-// Author Ewout Prangsma
-//
 
 package client
 
@@ -37,28 +35,23 @@ const (
 	defaultHTTPTimeout = time.Minute * 2
 )
 
-// DefaultHTTPClient creates a new HTTP client configured for accessing a starter.
-func DefaultHTTPClient(tlsConfig *tls.Config) *http.Client {
+// DefaultArangoSyncHTTPClient creates a new HTTP client configured for accessing a starter.
+// The variable `internal` should be set `true` if the connection within one DC.
+func DefaultArangoSyncHTTPClient(tlsConfig *tls.Config, internal bool, requestTimeout ...time.Duration) *http.Client {
+	timeout := defaultHTTPTimeout
+	if len(requestTimeout) > 0 {
+		timeout = requestTimeout[0]
+	}
 	if tlsConfig == nil {
 		tlsConfig = &tls.Config{
 			InsecureSkipVerify: true,
 		}
 	}
+
+	wrapper := func(c net.Conn) net.Conn { return c }
+
 	return &http.Client{
-		Timeout: defaultHTTPTimeout,
-		Transport: &http.Transport{
-			Proxy: http.ProxyFromEnvironment,
-			DialContext: (&net.Dialer{
-				Timeout:   30 * time.Second,
-				KeepAlive: 30 * time.Second,
-				DualStack: true,
-			}).DialContext,
-			MaxIdleConns:          100,
-			MaxIdleConnsPerHost:   10,
-			IdleConnTimeout:       90 * time.Second,
-			TLSHandshakeTimeout:   90 * time.Second,
-			TLSClientConfig:       tlsConfig,
-			ExpectContinueTimeout: 1 * time.Second,
-		},
+		Timeout:   timeout,
+		Transport: NewArangoSyncHTTPTransport(tlsConfig, wrapper),
 	}
 }

@@ -1,5 +1,5 @@
 //
-// Copyright 2017 ArangoDB GmbH, Cologne, Germany
+// Copyright 2017-2022 ArangoDB GmbH, Cologne, Germany
 //
 // The Programs (which include both the software and documentation) contain
 // proprietary information of ArangoDB GmbH; they are provided under a license
@@ -21,8 +21,6 @@
 // and shall use it only in accordance with the terms of the license agreement
 // you entered into with ArangoDB GmbH.
 //
-// Author Ewout Prangsma
-//
 
 package client
 
@@ -35,20 +33,25 @@ import (
 	certificates "github.com/arangodb-helper/go-certificates"
 
 	"github.com/arangodb/arangosync-client/pkg/errors"
-	"github.com/rs/zerolog"
 )
+
+type Cacher interface {
+	GetClient(source EndpointsCreator, auth Authentication, insecureSkipVerify bool) (API, error)
+}
 
 type ClientCache struct {
 	mutex   sync.Mutex
 	clients map[string]API
 }
 
-// GetClient returns a client used to access the source with given authentication.
-func (cc *ClientCache) GetClient(log zerolog.Logger, source Endpoint, auth Authentication, insecureSkipVerify bool) (API, error) {
-	if len(source) == 0 {
-		return nil, errors.Wrapf(PreconditionFailedError, "Cannot create master client: no source configured")
+// GetClient returns a client used to access the server with given authentication.
+func (cc *ClientCache) GetClient(endpointsCreator EndpointsCreator, auth Authentication, insecureSkipVerify bool) (API, error) {
+	endpoints := endpointsCreator.GetEndpoints()
+	if len(endpoints) == 0 {
+		return nil, errors.WithMessage(PreconditionFailedError, "no endpoints configured")
 	}
-	keyData := strings.Join(source, ",") + ":" + auth.String()
+
+	keyData := strings.Join(endpoints, ",") + ":" + auth.String()
 	key := fmt.Sprintf("%x", sha1.Sum([]byte(keyData)))
 
 	cc.mutex.Lock()
@@ -63,11 +66,9 @@ func (cc *ClientCache) GetClient(log zerolog.Logger, source Endpoint, auth Authe
 		return c, nil
 	}
 
-	// Client does not exist, create one
-	log.Debug().Msg("Creating new client")
-	c, err := cc.createClient(source, auth, insecureSkipVerify)
+	c, err := cc.createClient(endpoints, endpointsCreator.IsInternal(), auth, insecureSkipVerify)
 	if err != nil {
-		return nil, maskAny(err)
+		return nil, errors.WithMessage(err, "can not create client")
 	}
 
 	cc.clients[key] = c
@@ -76,26 +77,20 @@ func (cc *ClientCache) GetClient(log zerolog.Logger, source Endpoint, auth Authe
 }
 
 // createClient creates a client used to access the source with given authentication.
-func (cc *ClientCache) createClient(source Endpoint, auth Authentication, insecureSkipVerify bool) (API, error) {
-	if len(source) == 0 {
-		return nil, errors.Wrapf(PreconditionFailedError, "Cannot create master client: no source configured")
-	}
+func (cc *ClientCache) createClient(endpoints Endpoint, isInternal bool, auth Authentication, insecureSkipVerify bool) (API, error) {
 	tlsConfig, err := certificates.CreateTLSConfigFromAuthentication(AuthProxy{auth.TLSAuthentication}, insecureSkipVerify)
 	if err != nil {
-		return nil, maskAny(err)
+		return nil, errors.WithMessage(err, "can not create certificate")
 	}
-	ac := AuthenticationConfig{}
-	if auth.Username != "" {
-		ac.UserName = auth.Username
-		ac.Password = auth.Password
-	} else if auth.JWTSecret != "" {
-		ac.JWTSecret = auth.JWTSecret
-	} else if auth.ClientToken != "" {
-		ac.BearerToken = auth.ClientToken
-	}
-	c, err := NewArangoSyncClient(source, ac, tlsConfig)
+
+	ac := createAuthenticationConfig(auth)
+	c, err := NewArangoSyncClient(endpoints, isInternal, ac, tlsConfig)
 	if err != nil {
-		return nil, maskAny(err)
+		if isInternal {
+			return nil, errors.WithMessage(err, "can not create internal arangosync client")
+		}
+
+		return nil, errors.WithMessage(err, "can not create external arangosync client")
 	}
 	return c, nil
 }
@@ -133,3 +128,21 @@ type AuthProxy struct {
 func (a AuthProxy) CACertificate() string     { return a.TLSAuthentication.CACertificate }
 func (a AuthProxy) ClientCertificate() string { return a.TLSAuthentication.ClientCertificate }
 func (a AuthProxy) ClientKey() string         { return a.TLSAuthentication.ClientKey }
+
+func createAuthenticationConfig(auth Authentication) AuthenticationConfig {
+	ac := AuthenticationConfig{}
+	if auth.Username != "" {
+		ac.UserName = auth.Username
+		ac.Password = auth.Password
+
+		return ac
+	}
+
+	if auth.JWTSecret != "" {
+		ac.JWTSecret = auth.JWTSecret
+		return ac
+	}
+
+	ac.BearerToken = auth.ClientToken
+	return ac
+}

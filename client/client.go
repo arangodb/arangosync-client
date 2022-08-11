@@ -1,5 +1,5 @@
 //
-// Copyright 2017 ArangoDB GmbH, Cologne, Germany
+// Copyright 2017-2021 ArangoDB GmbH, Cologne, Germany
 //
 // The Programs (which include both the software and documentation) contain
 // proprietary information of ArangoDB GmbH; they are provided under a license
@@ -21,8 +21,6 @@
 // and shall use it only in accordance with the terms of the license agreement
 // you entered into with ArangoDB GmbH.
 //
-// Author Ewout Prangsma
-//
 
 package client
 
@@ -41,8 +39,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/arangodb/arangosync-client/pkg/jwt"
 	"github.com/pkg/errors"
+
+	"github.com/arangodb/arangosync-client/pkg/jwt"
+	"github.com/arangodb/arangosync-client/pkg/trigger"
 )
 
 type AuthenticationConfig struct {
@@ -53,7 +53,7 @@ type AuthenticationConfig struct {
 }
 
 var (
-	sharedHTTPClient = DefaultHTTPClient(nil)
+	sharedHTTPClient = DefaultArangoSyncHTTPClient(nil, true, 0)
 )
 
 const (
@@ -65,23 +65,30 @@ const (
 )
 
 // NewArangoSyncClient creates a new client implementation.
-func NewArangoSyncClient(endpoints []string, authConf AuthenticationConfig, tlsConfig *tls.Config) (API, error) {
-	httpClient := sharedHTTPClient
-	sharedClient := true
-	if tlsConfig != nil {
-		httpClient = DefaultHTTPClient(tlsConfig)
-		sharedClient = false
-	}
+// The clientID can be provided to create each request with the returned client.
+// The `internal` describes if the client connects to the local DC.
+func NewArangoSyncClient(endpoints []string, internal bool, authConf AuthenticationConfig, tlsConfig *tls.Config,
+	clientID ...string) (API, error) {
 	c := &client{
-		auth:         authConf,
-		client:       httpClient,
-		sharedClient: sharedClient,
+		auth: authConf,
 	}
-	c.client.Timeout = 0
-	c.endpoints.config = Endpoint(endpoints)
+
+	if tlsConfig != nil {
+		// It is not shared client.
+		c.client = DefaultArangoSyncHTTPClient(tlsConfig, internal)
+	} else {
+		// The shared client should be always internal connection.
+		c.client = sharedHTTPClient
+		c.sharedClient = true
+	}
+
+	if len(clientID) > 0 && len(clientID[0]) > 0 {
+		c.clientID = clientID[0]
+	}
+	c.endpoints.config = endpoints
 	list, err := c.endpoints.config.URLs()
 	if err != nil {
-		return nil, maskAny(err)
+		return nil, errors.Wrapf(err, "can not create URL's")
 	}
 	c.endpoints.urls = list
 	return c, nil
@@ -89,10 +96,12 @@ func NewArangoSyncClient(endpoints []string, authConf AuthenticationConfig, tlsC
 
 type client struct {
 	endpoints struct {
-		mutex     sync.RWMutex
-		config    Endpoint
-		urls      []url.URL
-		preferred int32
+		mutex                   sync.RWMutex
+		config                  Endpoint
+		urls                    []url.URL
+		preferredHost           string    // name:port of the current preferred endpoint
+		preferredHostExpiration time.Time // After this timestamp we forget the current preferred host to re-shuflle it
+		preferredHostMutex      sync.RWMutex
 	}
 	auth         AuthenticationConfig
 	client       *http.Client
@@ -101,7 +110,7 @@ type client struct {
 }
 
 const (
-	contentTypeJSON = "application/json"
+	preferredHostTimeout = time.Hour
 )
 
 // Returns the master API (only valid when Role returns master)
@@ -112,11 +121,6 @@ func (c *client) Master() MasterAPI {
 // Returns the worker API (only valid when Role returns worker)
 func (c *client) Worker() WorkerAPI {
 	return c
-}
-
-// Set the ID of the client that is making requests.
-func (c *client) SetClientID(id string) {
-	c.clientID = id
 }
 
 // SetShared marks the client as shared.
@@ -240,7 +244,7 @@ func (c *client) newRequests(method string, urls []string, body interface{}) ([]
 			return nil, maskAny(err)
 		}
 		req.Header.Set(AllowForwardRequestHeaderKey, "true")
-		if c.auth.JWTSecret != "" {
+		if c.auth.JWTSecret != "" { // nolint: gocritic
 			jwt.AddArangoSyncJwtHeader(req, c.auth.JWTSecret)
 		} else if c.auth.BearerToken != "" {
 			req.Header.Set("Authorization", "Bearer "+c.auth.BearerToken)
@@ -265,23 +269,58 @@ type response struct {
 
 // do performs the given requests all at once.
 // The first request to answer with a success or permanent failure is returned.
-func (c *client) do(ctx context.Context, reqs []*http.Request, result interface{}) error {
+func (c *client) do(ctx context.Context, reqs []*http.Request, result interface{}, concurrent ...bool) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	var cancel func()
-	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+	var timeout time.Duration
+	if deadline, hasDeadline := ctx.Deadline(); !hasDeadline {
 		ctx, cancel = context.WithTimeout(ctx, defaultHTTPTimeout)
+		timeout = defaultHTTPTimeout
 	} else {
 		ctx, cancel = context.WithCancel(ctx)
+		timeout = time.Until(deadline)
 	}
 	defer cancel()
 
-	// All requests sequencially
-	order := rand.Perm(len(reqs))
+	if len(reqs) > 1 {
+		// Shuffle requests to get random distribution
+		rand.Shuffle(len(reqs), func(i, j int) {
+			reqs[i], reqs[j] = reqs[j], reqs[i]
+		})
+	}
+
+	if len(concurrent) > 0 && concurrent[0] {
+		// All requests concurrently
+		if _, err := c.doOnce(ctx, reqs, result); err != nil {
+			return maskAny(err)
+		}
+		return nil
+	}
+
+	// Set preferred host first
+	for i, req := range reqs {
+		if isPreferred, hasPreferred := c.isPreferredHost(req.URL.Host); isPreferred {
+			if i == 0 {
+				// Already first, we're done
+				break
+			}
+			// Swap with position 0
+			reqs[0], reqs[i] = reqs[i], reqs[0]
+			break
+		} else if !hasPreferred {
+			// We have no preferred host, we can stop
+			break
+		}
+	}
+
+	// All requests sequentially
 	var lastErr error
-	for _, idx := range order {
-		retryNext, err := c.doOnce(ctx, []*http.Request{reqs[idx]}, result)
+	for _, req := range reqs {
+		lctx, cancel := context.WithTimeout(ctx, timeout/time.Duration(len(reqs)))
+		retryNext, err := c.doOnce(lctx, []*http.Request{req}, result)
+		cancel()
 		if err == nil {
 			return nil
 		}
@@ -302,10 +341,12 @@ func (c *client) do(ctx context.Context, reqs []*http.Request, result interface{
 // Return: retryNext, error
 func (c *client) doOnce(ctx context.Context, reqs []*http.Request, result interface{}) (bool, error) {
 	var cancel context.CancelFunc
+	var httpStatusCode int32
 	ctx, cancel = context.WithCancel(ctx)
 	resultChan := make(chan response, len(reqs))
 	errorChan := make(chan error, len(reqs))
 	wg := sync.WaitGroup{}
+
 	for regIdx, req := range reqs {
 		req = req.WithContext(ctx)
 		wg.Add(1)
@@ -313,13 +354,15 @@ func (c *client) doOnce(ctx context.Context, reqs []*http.Request, result interf
 			defer wg.Done()
 
 			if len(reqs) > 1 {
-				preferred := atomic.LoadInt32(&c.endpoints.preferred)
-				if int32(regIdx) != preferred {
-					select {
-					case <-time.After(time.Millisecond * 50):
-						// Continue
-					case <-ctx.Done():
-						// Context cancelled
+				isPreferred, hasPreferred := c.isPreferredHost(req.URL.Host)
+				if !isPreferred {
+					// Wait a bit depending on our index
+					offset := regIdx
+					if hasPreferred {
+						offset++
+					}
+
+					if trigger.WaitWithContext(ctx, time.Microsecond*time.Duration(2*offset)) == trigger.ContextDone {
 						errorChan <- maskAny(ctx.Err())
 						return
 					}
@@ -351,11 +394,12 @@ func (c *client) doOnce(ctx context.Context, reqs []*http.Request, result interf
 				}
 				// Cancel all other requests
 				cancel()
-				atomic.StoreInt32(&c.endpoints.preferred, int32(regIdx))
 				return
 			}
+
+			atomic.StoreInt32(&httpStatusCode, int32(statusCode))
 			// No permanent error, try next agent
-		}(regIdx+1, req) // regIdx+1 is intended. That way a preferred==0 results in all requests being fired at once.
+		}(regIdx, req)
 	}
 
 	// Wait for go routines to finished
@@ -365,6 +409,8 @@ func (c *client) doOnce(ctx context.Context, reqs []*http.Request, result interf
 	close(errorChan)
 	if resp, ok := <-resultChan; ok {
 		// Use first valid response
+		c.setPreferredHost(resp.Request.URL.Host)
+
 		// Read response body into memory
 		if resp.StatusCode != http.StatusOK {
 			// Unexpected status, try to parse error.
@@ -385,5 +431,31 @@ func (c *client) doOnce(ctx context.Context, reqs []*http.Request, result interf
 		// Return first error
 		return false, maskAny(err)
 	}
-	return true, errors.Wrapf(ServiceUnavailableError, "All %d servers responded with temporary failure", len(reqs))
+
+	return true, errors.Wrapf(ServiceUnavailableError,
+		"All %d servers responded with temporary failure with http status code: %d", len(reqs), httpStatusCode)
+}
+
+// isPreferredHost returns true if the given host is the preferred host to connect to.
+// Returns: isGivenHostPreferred, hasPreferredHost
+func (c *client) isPreferredHost(host string) (bool, bool) {
+	c.endpoints.preferredHostMutex.RLock()
+	defer c.endpoints.preferredHostMutex.RUnlock()
+	preferredHost := c.endpoints.preferredHost
+	if time.Now().After(c.endpoints.preferredHostExpiration) {
+		// Our preferred host record has expired.
+		// Assume we have no preferred host
+		preferredHost = ""
+	}
+	return host == preferredHost, preferredHost != ""
+}
+
+// setPreferredHost records the preferred host to connect to.
+func (c *client) setPreferredHost(host string) {
+	if isPreferred, _ := c.isPreferredHost(host); !isPreferred {
+		c.endpoints.preferredHostMutex.Lock()
+		defer c.endpoints.preferredHostMutex.Unlock()
+		c.endpoints.preferredHost = host
+		c.endpoints.preferredHostExpiration = time.Now().Add(preferredHostTimeout)
+	}
 }

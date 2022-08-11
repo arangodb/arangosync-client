@@ -21,8 +21,6 @@
 // and shall use it only in accordance with the terms of the license agreement
 // you entered into with ArangoDB GmbH.
 //
-// Author Ewout Prangsma
-//
 
 package client
 
@@ -58,6 +56,26 @@ func (c *client) StopTask(ctx context.Context, taskID string) error {
 	if err != nil {
 		return maskAny(err)
 	}
+	if err := c.do(ctx, req, nil); err != nil {
+		return maskAny(err)
+	}
+
+	return nil
+}
+
+// Configuration is called by the master to instruct the worker that JWT secret has been changed.
+func (c *client) Configure(ctx context.Context, jwtSecret string) error {
+	url := c.createURLs("/_api/worker/configure", nil)
+
+	data := ConfigurationRequest{
+		JWTSecret: jwtSecret,
+	}
+
+	req, err := c.newRequests("PUT", url, data)
+	if err != nil {
+		return maskAny(err)
+	}
+
 	if err := c.do(ctx, req, nil); err != nil {
 		return maskAny(err)
 	}

@@ -1,5 +1,5 @@
 //
-// Copyright 2017 ArangoDB GmbH, Cologne, Germany
+// Copyright 2017-2022 ArangoDB GmbH, Cologne, Germany
 //
 // The Programs (which include both the software and documentation) contain
 // proprietary information of ArangoDB GmbH; they are provided under a license
@@ -21,8 +21,6 @@
 // and shall use it only in accordance with the terms of the license agreement
 // you entered into with ArangoDB GmbH.
 //
-// Author Ewout Prangsma
-//
 
 package tasks
 
@@ -30,7 +28,19 @@ import (
 	"context"
 	"reflect"
 	"time"
+
+	"github.com/rs/zerolog"
 )
+
+// TaskController is an interface which describes how to control a task.
+type TaskController interface {
+	// Validate checks if the task is still valid.
+	Validate(ctx context.Context, taskID string) error
+	// ResetTask resets a task.
+	ResetTask(ctx context.Context, dbName, col string, shardIndex int) error
+	// GetMessageTimeout gets message timeout for a task.
+	GetMessageTimeout() time.Duration
+}
 
 // TaskData contains persistent data of a task.
 // This data is stored as JSON object in the agency.
@@ -57,8 +67,8 @@ type TaskData struct {
 	ShardIndex int `json:"shardIndex,omitempty"`
 }
 
-// IsShardSpecific returns true when the task is intended to operate on a specific
-// shard.
+// IsShardSpecific returns true when the task is intended to operate on a specific shard.
+// The persistent task is not the specific shard task.
 func (t TaskData) IsShardSpecific() bool {
 	return t.Database != "" && t.Collection != ""
 }
@@ -98,25 +108,13 @@ type TaskWorker interface {
 	// If waitUntilFinished is set, do not return until the task has been stopped.
 	Stop(waitUntilFinished bool) error
 
-	// Update the message timeout of this task.
-	// This timeout is the maximum time between messages
-	// in a task channel.
-	// If no messages have been received within the
-	// message timeout period, the channel is considered
-	// broken.
-	// If is up to the task implementation to cope
-	// with a broken channel.
-	SetMessageTimeout(timeout time.Duration)
-
-	// Returns true if this task does not have a valid shard master, but does need it.
-	HasUnknownShardMaster() bool
-
 	// RenewTokens is called once every 5 minutes. The task worker is expected to renew all
 	// authentication tokens it needs.
 	RenewTokens(ctx context.Context) error
 }
 
 // TLSClientAuthentication contains configuration for using client certificates or client tokens.
+// If new field is added then the function `Equals` must be changed if it is necessary.
 type TLSClientAuthentication struct {
 	// Client certificate used to authenticate myself.
 	ClientCertificate string `json:"clientCertificate"`
@@ -129,6 +127,11 @@ type TLSClientAuthentication struct {
 // String returns a string representation of the given object.
 func (a TLSClientAuthentication) String() string {
 	return a.ClientCertificate + "/" + a.ClientKey + "/" + a.ClientToken
+}
+
+// Equals returns true if the structures are the same.
+func (a TLSClientAuthentication) Equals(other TLSClientAuthentication) bool {
+	return a == other
 }
 
 // TLSAuthentication contains configuration for using client certificates
@@ -145,9 +148,26 @@ func (a TLSAuthentication) String() string {
 	return a.TLSClientAuthentication.String() + "/" + a.CACertificate
 }
 
+// Equals returns true if the structures are the same.
+// If new field is added then the function `Equals` must be changed if it is necessary.
+func (a TLSAuthentication) Equals(other TLSAuthentication) bool {
+	return a.CACertificate == other.CACertificate &&
+		a.TLSClientAuthentication == other.TLSClientAuthentication
+}
+
 // MessageQueueConfig contains all deployment configuration info for a MQ.
 type MessageQueueConfig struct {
 	Type           string            `json:"type"`
 	Endpoints      []string          `json:"endpoints"`
 	Authentication TLSAuthentication `json:"authentication"`
+}
+
+// CommonConfig contains the parameters to be used by all workers.
+type CommonConfig struct {
+	TaskID              string
+	TaskData            *TaskData
+	TaskController      TaskController
+	Log                 zerolog.Logger
+	ServerID            int64
+	ExcludeRootUserSync bool
 }

@@ -21,66 +21,30 @@
 // and shall use it only in accordance with the terms of the license agreement
 // you entered into with ArangoDB GmbH.
 //
-// Author Ewout Prangsma
-//
 
 package errors
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"net"
 	"net/url"
 	"os"
 	"syscall"
 
-	driver "github.com/arangodb/go-driver"
 	errs "github.com/pkg/errors"
+
+	driver "github.com/arangodb/go-driver"
 )
 
 var (
-	Cause     = errs.Cause
-	New       = errs.New
-	WithStack = errs.WithStack
-	Wrap      = errs.Wrap
-	Wrapf     = errs.Wrapf
+	Cause       = errs.Cause
+	New         = errs.New
+	WithStack   = errs.WithStack
+	Wrap        = errs.Wrap
+	Wrapf       = errs.Wrapf
+	WithMessage = errs.WithMessage
 )
-
-// WithMessage annotates err with a new message.
-// The messages of given error is hidden.
-// If err is nil, WithMessage returns nil.
-func WithMessage(err error, message string) error {
-	if err == nil {
-		return nil
-	}
-	return &withMessage{
-		cause: err,
-		msg:   message,
-	}
-}
-
-type withMessage struct {
-	cause error
-	msg   string
-}
-
-func (w *withMessage) Error() string { return w.msg }
-func (w *withMessage) Cause() error  { return w.cause }
-
-func (w *withMessage) Format(s fmt.State, verb rune) {
-	switch verb {
-	case 'v':
-		if s.Flag('+') {
-			fmt.Fprintf(s, "%+v\n", w.Cause())
-			io.WriteString(s, w.msg)
-			return
-		}
-		fallthrough
-	case 's', 'q':
-		io.WriteString(s, w.Error())
-	}
-}
 
 type timeout interface {
 	Timeout() bool
@@ -172,36 +136,28 @@ func IsContextDeadlineExpired(err error) bool {
 	return false
 }
 
-// IsContextCanceledOrExpired returns true if the given error is caused by a context cancelation
-// or deadline expiration.
-func IsContextCanceledOrExpired(err error) bool {
-	err = errs.Cause(err)
-	if err == context.Canceled || err == context.DeadlineExceeded {
-		return true
-	}
-	if ok, err := libCause(err); ok {
-		return IsContextCanceledOrExpired(err)
-	}
-	return false
-}
-
 // libCause returns the Cause of well known go library errors.
 func libCause(err error) (bool, error) {
-	original := err
+	changed := false
 	for {
 		switch e := err.(type) {
 		case *driver.ResponseError:
 			err = e.Err
+			changed = true
 		case *net.DNSConfigError:
 			err = e.Err
+			changed = true
 		case *net.OpError:
 			err = e.Err
+			changed = true
 		case *os.SyscallError:
 			err = e.Err
+			changed = true
 		case *url.Error:
 			err = e.Err
+			changed = true
 		default:
-			return err != original, err
+			return changed, err
 		}
 	}
 }

@@ -1,5 +1,5 @@
 //
-// Copyright 2017 ArangoDB GmbH, Cologne, Germany
+// Copyright 2017-2022 ArangoDB GmbH, Cologne, Germany
 //
 // The Programs (which include both the software and documentation) contain
 // proprietary information of ArangoDB GmbH; they are provided under a license
@@ -21,8 +21,6 @@
 // and shall use it only in accordance with the terms of the license agreement
 // you entered into with ArangoDB GmbH.
 //
-// Author Ewout Prangsma
-//
 
 package client
 
@@ -32,6 +30,10 @@ import (
 	"path"
 	"strconv"
 	"time"
+
+	"github.com/pkg/errors"
+
+	"github.com/arangodb/go-driver"
 )
 
 // Get a prefix for names of channels that contain message
@@ -51,20 +53,37 @@ func (c *client) ChannelPrefix(ctx context.Context) (string, error) {
 	return result.Prefix, nil
 }
 
-// Get the local message queue configuration.
-func (c *client) GetMessageQueueConfig(ctx context.Context) (MessageQueueConfig, error) {
+// CreateMessageQueueConfig creates a remote MQ configuration.
+func (c *client) CreateMessageQueueConfig(ctx context.Context) (MessageQueueConfigExt, error) {
 	url := c.createURLs("/_api/mq/config", nil)
 
-	var result MessageQueueConfig
+	var result MessageQueueConfigExt
+	// It should be a POST method , but for the backward compatibility it is the GET method.
 	req, err := c.newRequests("GET", url, nil)
 	if err != nil {
-		return MessageQueueConfig{}, maskAny(err)
+		return MessageQueueConfigExt{}, maskAny(err)
 	}
 	if err := c.do(ctx, req, &result); err != nil {
-		return MessageQueueConfig{}, maskAny(err)
+		return MessageQueueConfigExt{}, maskAny(err)
 	}
 
 	return result, nil
+}
+
+// UpdateMessageQueue sends requests to the remote DC to update an MQ config.
+func (c *client) UpdateMessageQueue(ctx context.Context, input UpdateMQConfigRequest) error {
+	url := c.createURLs("/_api/mq/config", nil)
+
+	var result SyncInfo
+	req, err := c.newRequests("PUT", url, input)
+	if err != nil {
+		return errors.WithMessage(err, "failed to create a request")
+	}
+	if err := c.do(ctx, req, &result); err != nil {
+		return errors.WithMessage(err, "failed to perform a request")
+	}
+
+	return nil
 }
 
 // Gets the current status of synchronization towards the local cluster.
@@ -108,7 +127,8 @@ func (c *client) GetEndpoints(ctx context.Context) (Endpoint, error) {
 		return nil, maskAny(err)
 	}
 	var result EndpointsResponse
-	if err := c.do(ctx, req, &result); err != nil {
+	concurrent := true
+	if err := c.do(ctx, req, &result, concurrent); err != nil {
 		return nil, maskAny(err)
 	}
 
@@ -181,6 +201,59 @@ func (c *client) CancelSynchronization(ctx context.Context, input CancelSynchron
 	return result, nil
 }
 
+// CreateSynchronizationBarrier creates a barrier in the current synchronization
+// that stops the source cluster from accepting any modifications
+// such that the destination cluster can catch up.
+func (c *client) CreateSynchronizationBarrier(ctx context.Context) error {
+	url := c.createURLs("/_api/sync/barrier", nil)
+
+	req, err := c.newRequests("POST", url, nil)
+	if err != nil {
+		return maskAny(err)
+	}
+	if err := c.do(ctx, req, nil); err != nil {
+		return maskAny(err)
+	}
+
+	return nil
+}
+
+// CancelSynchronizationBarrier removes the active barrier in the current synchronization
+// that stops the source cluster from accepting any modifications
+// such that the destination cluster can catch up.
+// If there is not active barrier, this function returns without an error.
+func (c *client) CancelSynchronizationBarrier(ctx context.Context) error {
+	url := c.createURLs("/_api/sync/barrier", nil)
+
+	req, err := c.newRequests("DELETE", url, nil)
+	if err != nil {
+		return maskAny(err)
+	}
+	if err := c.do(ctx, req, nil); err != nil {
+		return maskAny(err)
+	}
+
+	return nil
+}
+
+// GetSynchronizationBarrierStatus returns the status of the the active barrier
+// in the current synchronization that stops the source cluster from accepting any modifications
+// such that the destination cluster can catch up.
+func (c *client) GetSynchronizationBarrierStatus(ctx context.Context) (SynchronizationBarrierStatus, error) {
+	url := c.createURLs("/_api/sync/barrier", nil)
+
+	req, err := c.newRequests("GET", url, nil)
+	if err != nil {
+		return SynchronizationBarrierStatus{}, maskAny(err)
+	}
+	var result SynchronizationBarrierStatus
+	if err := c.do(ctx, req, &result); err != nil {
+		return SynchronizationBarrierStatus{}, maskAny(err)
+	}
+
+	return result, nil
+}
+
 // Reset a failed shard synchronization.
 func (c *client) ResetShardSynchronization(ctx context.Context, dbName, colName string, shardIndex int) error {
 	url := c.createURLs(path.Join("/_api/sync/database", dbName, "collection", colName, "shard", strconv.Itoa(shardIndex), "reset"), nil)
@@ -195,10 +268,27 @@ func (c *client) ResetShardSynchronization(ctx context.Context, dbName, colName 
 	return nil
 }
 
+// GetMessageTimeout gets the maximum allowed time between messages in a task channel.
+func (c *client) GetMessageTimeout(ctx context.Context) (MessageTimeoutInfo, error) {
+	url := c.createURLs("/_api/message-timeout", nil)
+
+	req, err := c.newRequests("GET", url, nil)
+	if err != nil {
+		return MessageTimeoutInfo{}, maskAny(err)
+	}
+
+	var messageTimeout MessageTimeoutInfo
+	if err := c.do(ctx, req, &messageTimeout); err != nil {
+		return MessageTimeoutInfo{}, maskAny(err)
+	}
+
+	return messageTimeout, nil
+}
+
 // Update the maximum allowed time between messages in a task channel.
 func (c *client) SetMessageTimeout(ctx context.Context, timeout time.Duration) error {
 	url := c.createURLs("/_api/message-timeout", nil)
-	input := SetMessageTimeoutRequest{
+	input := MessageTimeoutInfo{
 		MessageTimeout: timeout,
 	}
 	req, err := c.newRequests("PUT", url, input)
@@ -227,7 +317,8 @@ func (c *client) SynchronizeShard(ctx context.Context, dbName, colName string, s
 	return nil
 }
 
-// Stop tasks to synchronize a shard in the given db+col.
+// CancelSynchronizeShard marks synchronization state to cancelling
+// for the given shard (database name + collection name + shard index).
 func (c *client) CancelSynchronizeShard(ctx context.Context, dbName, colName string, shardIndex int) error {
 	url := c.createURLs(path.Join("/_api/sync/database", dbName, "collection", colName, "shard", strconv.Itoa(shardIndex)), nil)
 
@@ -351,8 +442,11 @@ func (c *client) OutgoingSynchronization(ctx context.Context, input OutgoingSync
 }
 
 // Cancel sending synchronization data to the remote cluster with given ID.
-func (c *client) CancelOutgoingSynchronization(ctx context.Context, remoteID string) error {
-	url := c.createURLs(path.Join("/_api/sync/outgoing", remoteID), nil)
+func (c *client) CancelOutgoingSynchronization(ctx context.Context, remoteID string, serverMode driver.ServerMode) error {
+	query := make(url.Values)
+	query["server_mode"] = []string{string(serverMode)}
+
+	url := c.createURLs(path.Join("/_api/sync/outgoing", remoteID), query)
 
 	req, err := c.newRequests("DELETE", url, nil)
 	if err != nil {
@@ -413,14 +507,48 @@ func (c *client) OutgoingSynchronizeShardStatus(ctx context.Context, entries []S
 	return nil
 }
 
-// Reset a failed shard synchronization.
-func (c *client) OutgoingResetShardSynchronization(ctx context.Context, remoteID, dbName, colName string, shardIndex int, newControlChannel, newDataChannel string) error {
-	url := c.createURLs(path.Join("/_api/sync/outgoing", remoteID, "database", dbName, "collection", colName, "shard", strconv.Itoa(shardIndex), "reset"), nil)
+// OutgoingResetShardSynchronization sends request mark outgoing shard that it should be recreated.
+func (c *client) OutgoingResetShardSynchronization(ctx context.Context, remoteID, dbName, colName string, shardIndex int,
+	newControlChannel, newDataChannel string) error {
+	url := c.createURLs(path.Join("/_api/sync/outgoing", remoteID, "database", dbName, "collection", colName, "shard",
+		strconv.Itoa(shardIndex), "reset"), nil)
 
 	input := OutgoingSynchronizeShardRequest{}
 	input.Channels.Control = newControlChannel
 	input.Channels.Data = newDataChannel
 	req, err := c.newRequests("PUT", url, input)
+	if err != nil {
+		return maskAny(err)
+	}
+	if err := c.do(ctx, req, nil); err != nil {
+		return maskAny(err)
+	}
+
+	return nil
+}
+
+// CreateOutgoingSynchronizationBarrier creates a barrier in the outgoing
+// synchronization to the remote cluster with the given ID.
+func (c *client) CreateOutgoingSynchronizationBarrier(ctx context.Context, remoteID string) error {
+	url := c.createURLs(path.Join("/_api/sync/outgoing", remoteID, "barrier"), nil)
+
+	req, err := c.newRequests("POST", url, nil)
+	if err != nil {
+		return maskAny(err)
+	}
+	if err := c.do(ctx, req, nil); err != nil {
+		return maskAny(err)
+	}
+
+	return nil
+}
+
+// CancelOutgoingSynchronizationBarrier removes the active barrier in the
+// current synchronization to the remote cluster with given ID.
+func (c *client) CancelOutgoingSynchronizationBarrier(ctx context.Context, remoteID string) error {
+	url := c.createURLs(path.Join("/_api/sync/outgoing", remoteID, "barrier"), nil)
+
+	req, err := c.newRequests("DELETE", url, nil)
 	if err != nil {
 		return maskAny(err)
 	}
@@ -482,14 +610,15 @@ func (c *client) RegisteredWorker(ctx context.Context, id string) (WorkerRegistr
 	return result, nil
 }
 
-// Register (or update registration of) a worker
-func (c *client) RegisterWorker(ctx context.Context, endpoint, token, hostID string) (WorkerRegistrationResponse, error) {
+// RegisterWorker registers or updates the new worker in the ArangoSync master leader.
+func (c *client) RegisterWorker(ctx context.Context, endpoint, token, hostID, dbServerAffinity string) (WorkerRegistrationResponse, error) {
 	url := c.createURLs("/_api/worker", nil)
 
 	input := WorkerRegistrationRequest{
-		Endpoint: endpoint,
-		Token:    token,
-		HostID:   hostID,
+		Endpoint:         endpoint,
+		Token:            token,
+		HostID:           hostID,
+		DBServerAffinity: dbServerAffinity,
 	}
 	var result WorkerRegistrationResponse
 	req, err := c.newRequests("PUT", url, input)
@@ -579,4 +708,42 @@ func (c *client) TaskCompleted(ctx context.Context, taskID string, info TaskComp
 	}
 
 	return nil
+}
+
+// GetChecksumShardSynchronization gets checksum of the data for specific shard.
+func (c *client) GetChecksumShardSynchronization(ctx context.Context, dbName, colName string,
+	shardIndex int, options ChecksumSynchronizationRequestOptions) (ChecksumSynchronizationResponse, error) {
+
+	url := c.createURLs(path.Join("/_api/sync/database", dbName, "collection", colName, "shard",
+		strconv.Itoa(shardIndex), "checksum"), nil)
+
+	req, err := c.newRequests("GET", url, options)
+	if err != nil {
+		return ChecksumSynchronizationResponse{}, maskAny(err)
+	}
+
+	result := ChecksumSynchronizationResponse{}
+	if err := c.do(ctx, req, &result); err != nil {
+		return ChecksumSynchronizationResponse{}, maskAny(err)
+	}
+
+	return result, nil
+}
+
+// GetDataCentersInfo gets shards for all datacenters which are included in synchronization.
+func (c *client) GetDataCentersInfo(ctx context.Context) (DataCentersResponse, error) {
+
+	url := c.createURLs(path.Join("/_api/sync/shards"), nil)
+
+	req, err := c.newRequests("GET", url, nil)
+	if err != nil {
+		return DataCentersResponse{}, maskAny(err)
+	}
+
+	result := DataCentersResponse{}
+	if err := c.do(ctx, req, &result); err != nil {
+		return DataCentersResponse{}, maskAny(err)
+	}
+
+	return result, nil
 }
