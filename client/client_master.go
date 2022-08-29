@@ -118,7 +118,7 @@ func (c *client) Health(ctx context.Context) error {
 	return nil
 }
 
-// Return a list of all known master endpoints of this datacenter.
+// GetEndpoints returns a list of all known master endpoints of this datacenter.
 func (c *client) GetEndpoints(ctx context.Context) (Endpoint, error) {
 	url := c.createURLs("/_api/endpoints", nil)
 
@@ -135,7 +135,7 @@ func (c *client) GetEndpoints(ctx context.Context) (Endpoint, error) {
 	return result.Endpoints, nil
 }
 
-// Return a list of master endpoints of the leader (syncmaster) of this datacenter.
+// GetLeaderEndpoint returns a list of master endpoints of the leader (syncmaster) of this datacenter.
 // Length of returned list will 1 or the call will fail because no master is available.
 func (c *client) GetLeaderEndpoint(ctx context.Context) (Endpoint, error) {
 	url := c.createURLs("/_api/leader/endpoint", nil)
@@ -723,7 +723,7 @@ func (c *client) GetChecksumShardSynchronization(ctx context.Context, dbName, co
 	}
 
 	result := ChecksumSynchronizationResponse{}
-	if err := c.do(ctx, req, &result); err != nil {
+	if err = c.do(ctx, req, &result); err != nil {
 		return ChecksumSynchronizationResponse{}, maskAny(err)
 	}
 
