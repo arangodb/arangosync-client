@@ -159,10 +159,16 @@ type ChannelPrefixInfo struct {
 
 // SyncInfo holds the JSON info returned from `GET /_api/sync`
 type SyncInfo struct {
-	Source   Endpoint           `json:"source"`             // Endpoint of sync master on remote cluster
-	Status   SyncStatus         `json:"status"`             // Overall status of (incoming) synchronization
-	Shards   []ShardSyncInfo    `json:"shards,omitempty"`   // Status of incoming synchronization per shard
-	Outgoing []OutgoingSyncInfo `json:"outgoing,omitempty"` // Status of outgoing synchronization
+	// Endpoint of sync master on remote cluster
+	Source Endpoint `json:"source"`
+	// Overall status of (incoming) synchronization
+	Status SyncStatus `json:"status"`
+	// Status of incoming synchronization per shard
+	Shards []ShardSyncInfo `json:"shards,omitempty"`
+	// Status of outgoing synchronization
+	Outgoing []OutgoingSyncInfo `json:"outgoing,omitempty"`
+	// CancellationAborted is set to true when it was not possible to cancel synchronization on source DC.
+	CancellationAborted bool `json:"cancellationAborted,omitempty"`
 }
 
 // OutgoingSyncInfo holds JSON info returned as part of `GET /_api/sync`
@@ -178,7 +184,7 @@ type OutgoingSyncInfo struct {
 // ShardSyncInfo holds JSON info returned as part of `GET /_api/sync`
 // regarding a specific shard.
 type ShardSyncInfo struct {
-	Database              string        `json:"database"`                 // Database containing the collection - shard
+	Database              string        `json:"database"`                 // Database containing the collection shard
 	Collection            string        `json:"collection"`               // Collection containing the shard
 	ShardIndex            int           `json:"shardIndex"`               // Index of the shard (0..)
 	Status                SyncStatus    `json:"status"`                   // Status of this shard
@@ -314,10 +320,12 @@ func (r SynchronizationRequest) Validate() error {
 }
 
 type CancelSynchronizationRequest struct {
-	// WaitTimeout is the amount of time the cancel function will wait
+	// Deprecated: WaitTimeout is the amount of time the cancel function will wait
 	// until the synchronization has reached an `inactive` state.
 	// If this value is zero, the cancel function will only switch to the canceling state
 	// but not wait until the `inactive` state is reached.
+	// Cancellation request should be sent without this field and the synchronization status
+	// should be checked periodically.
 	WaitTimeout time.Duration `json:"wait_timeout,omitempty"`
 	// Force is set if you want to end the synchronization even if the source
 	// master cannot be reached.
@@ -342,6 +350,10 @@ type CancelSynchronizationResponse struct {
 	Source Endpoint `json:"source,omitempty"`
 	// ClusterID is the ID of the local synchronization cluster.
 	ClusterID string `json:"cluster_id,omitempty"`
+	// Cancelling is set to true when synchronization is being cancelled.
+	Cancelling bool `json:"cancelling,omitempty"`
+	// Message is additional info which can be interpreted by a client.
+	Message string `json:"message,omitempty"`
 }
 
 // MessageTimeoutInfo holds the timeout message info.
@@ -484,11 +496,13 @@ type DataCenterShardResponse struct {
 
 // DataCenterCollectionResponse stores information about a collection in the data center.
 type DataCenterCollectionResponse struct {
-	Shards map[int]DataCenterShardResponse `json:"shards,omitempty"`
+	CollectionID string                          `json:"collection_id"`
+	Shards       map[int]DataCenterShardResponse `json:"shards,omitempty"`
 }
 
 // DataCenterDatabaseResponse stores information about a database in the data center.
 type DataCenterDatabaseResponse struct {
+	DatabaseID  string                                  `json:"database_id"`
 	Collections map[string]DataCenterCollectionResponse `json:"collections,omitempty"`
 	Err         string                                  `json:"error"`
 }
