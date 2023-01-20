@@ -27,7 +27,6 @@ package client
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"io"
@@ -52,10 +51,6 @@ type AuthenticationConfig struct {
 	Password    string
 }
 
-var (
-	sharedHTTPClient = DefaultArangoSyncHTTPClient(nil, true, 0)
-)
-
 const (
 	// AllowForwardRequestHeaderKey is a request header key.
 	// If this header is set, the syncmaster will forward
@@ -67,20 +62,18 @@ const (
 // NewArangoSyncClient creates a new client implementation.
 // The clientID can be provided to create each request with the returned client.
 // The `internal` describes if the client connects to the local DC.
-func NewArangoSyncClient(endpoints []string, internal bool, authConf AuthenticationConfig, tlsConfig *tls.Config,
+func NewArangoSyncClient(endpoints []string, internal bool, authConf AuthenticationConfig, tlsConfig *TLSConfig,
 	clientID ...string) (API, error) {
 	c := &client{
 		auth: authConf,
 	}
 
-	if tlsConfig != nil {
-		// It is not shared client.
-		c.client = DefaultArangoSyncHTTPClient(tlsConfig, internal)
-	} else {
-		// The shared client should be always internal connection.
-		c.client = sharedHTTPClient
-		c.sharedClient = true
+	var err error
+	c.client, err = httpCache.getHTTPClient(tlsConfig, internal)
+	if err != nil {
+		return nil, err
 	}
+	c.sharedClient = true
 
 	if len(clientID) > 0 && len(clientID[0]) > 0 {
 		c.clientID = clientID[0]
@@ -88,7 +81,7 @@ func NewArangoSyncClient(endpoints []string, internal bool, authConf Authenticat
 	c.endpoints.config = endpoints
 	list, err := c.endpoints.config.URLs()
 	if err != nil {
-		return nil, errors.Wrapf(err, "can not create URL's")
+		return nil, errors.WithMessage(err, "can not create URL's")
 	}
 	c.endpoints.urls = list
 	return c, nil
@@ -113,12 +106,12 @@ const (
 	preferredHostTimeout = time.Hour
 )
 
-// Returns the master API (only valid when Role returns master)
+// Master returns the master API (only valid when Role returns master).
 func (c *client) Master() MasterAPI {
 	return c
 }
 
-// Returns the worker API (only valid when Role returns worker)
+// Worker returns the worker API (only valid when Role returns worker).
 func (c *client) Worker() WorkerAPI {
 	return c
 }
@@ -146,10 +139,10 @@ func (c *client) Version(ctx context.Context) (VersionInfo, error) {
 	var result VersionInfo
 	req, err := c.newRequests("GET", url, nil)
 	if err != nil {
-		return VersionInfo{}, maskAny(err)
+		return VersionInfo{}, err
 	}
 	if err := c.do(ctx, req, &result); err != nil {
-		return VersionInfo{}, maskAny(err)
+		return VersionInfo{}, err
 	}
 
 	return result, nil
@@ -162,10 +155,10 @@ func (c *client) Role(ctx context.Context) (Role, error) {
 	var result RoleInfo
 	req, err := c.newRequests("GET", url, nil)
 	if err != nil {
-		return "", maskAny(err)
+		return "", err
 	}
 	if err := c.do(ctx, req, &result); err != nil {
-		return "", maskAny(err)
+		return "", err
 	}
 
 	return result.Role, nil
@@ -187,7 +180,7 @@ func (c *client) SynchronizeMasterEndpoints(ctx context.Context) (bool, error) {
 	// Fetch all endpoints
 	update, err := c.GetEndpoints(ctx)
 	if err != nil {
-		return false, errors.Wrap(err, "Failed to get master endpoints")
+		return false, errors.WithMessage(err, "Failed to get master endpoints")
 	}
 	c.endpoints.mutex.Lock()
 	defer c.endpoints.mutex.Unlock()
@@ -195,13 +188,22 @@ func (c *client) SynchronizeMasterEndpoints(ctx context.Context) (bool, error) {
 		// Load changed
 		list, err := update.URLs()
 		if err != nil {
-			return false, errors.Wrap(err, "Failed to parse master endpoints")
+			return false, errors.WithMessage(err, "Failed to parse master endpoints")
 		}
 		c.endpoints.config = update
 		c.endpoints.urls = list
 		return true, nil
 	}
 	return false, nil
+}
+
+// GetQueryValue returns value from request query for a given parameter.
+func GetQueryValue(r *http.Request, param string) (bool, string) {
+	if values := r.URL.Query()[param]; len(values) > 0 {
+		return true, values[0]
+	}
+
+	return false, ""
 }
 
 // createURLs creates a full URLs (for all endpoints) for a request with given local path & query.
@@ -229,7 +231,7 @@ func (c *client) newRequests(method string, urls []string, body interface{}) ([]
 		var err error
 		encoded, err = json.Marshal(body)
 		if err != nil {
-			return nil, maskAny(err)
+			return nil, err
 		}
 	}
 
@@ -241,7 +243,7 @@ func (c *client) newRequests(method string, urls []string, body interface{}) ([]
 		}
 		req, err := http.NewRequest(method, url, bodyRd)
 		if err != nil {
-			return nil, maskAny(err)
+			return nil, err
 		}
 		req.Header.Set(AllowForwardRequestHeaderKey, "true")
 		if c.auth.JWTSecret != "" { // nolint: gocritic
@@ -294,7 +296,7 @@ func (c *client) do(ctx context.Context, reqs []*http.Request, result interface{
 	if len(concurrent) > 0 && concurrent[0] {
 		// All requests concurrently
 		if _, err := c.doOnce(ctx, reqs, result); err != nil {
-			return maskAny(err)
+			return err
 		}
 		return nil
 	}
@@ -327,13 +329,13 @@ func (c *client) do(ctx context.Context, reqs []*http.Request, result interface{
 		if retryNext {
 			lastErr = err
 		} else {
-			return maskAny(err)
+			return err
 		}
 	}
 	if lastErr != nil {
-		return maskAny(lastErr)
+		return lastErr
 	}
-	return maskAny(errors.Wrapf(ServiceUnavailableError, "No requests available"))
+	return errors.WithMessage(ServiceUnavailableError, "No requests available")
 }
 
 // doOnce performs the given requests all at once.
@@ -363,7 +365,7 @@ func (c *client) doOnce(ctx context.Context, reqs []*http.Request, result interf
 					}
 
 					if trigger.WaitWithContext(ctx, time.Microsecond*time.Duration(2*offset)) == trigger.ContextDone {
-						errorChan <- maskAny(ctx.Err())
+						errorChan <- ctx.Err()
 						return
 					}
 				}
@@ -371,7 +373,7 @@ func (c *client) doOnce(ctx context.Context, reqs []*http.Request, result interf
 			resp, err := c.client.Do(req)
 			if err != nil {
 				// Request failed
-				errorChan <- maskAny(err)
+				errorChan <- err
 				return
 			}
 
@@ -382,7 +384,7 @@ func (c *client) doOnce(ctx context.Context, reqs []*http.Request, result interf
 				defer resp.Body.Close()
 				body, err := ioutil.ReadAll(resp.Body)
 				if err != nil {
-					errorChan <- maskAny(err)
+					errorChan <- err
 					return
 				}
 
@@ -414,7 +416,7 @@ func (c *client) doOnce(ctx context.Context, reqs []*http.Request, result interf
 		// Read response body into memory
 		if resp.StatusCode != http.StatusOK {
 			// Unexpected status, try to parse error.
-			return false, maskAny(parseResponseError(resp.Body, resp.StatusCode))
+			return false, parseResponseError(resp.Body, resp.StatusCode)
 		}
 
 		// Got a success status
@@ -429,10 +431,10 @@ func (c *client) doOnce(ctx context.Context, reqs []*http.Request, result interf
 	}
 	if err, ok := <-errorChan; ok {
 		// Return first error
-		return false, maskAny(err)
+		return false, err
 	}
 
-	return true, errors.Wrapf(ServiceUnavailableError,
+	return true, errors.WithMessagef(ServiceUnavailableError,
 		"All %d servers responded with temporary failure with http status code: %d", len(reqs), httpStatusCode)
 }
 

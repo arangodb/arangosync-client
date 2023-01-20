@@ -1,5 +1,5 @@
 //
-// Copyright 2017 ArangoDB GmbH, Cologne, Germany
+// Copyright 2017-2023 ArangoDB GmbH, Cologne, Germany
 //
 // The Programs (which include both the software and documentation) contain
 // proprietary information of ArangoDB GmbH; they are provided under a license
@@ -54,6 +54,16 @@ func Permanent(err error) error {
 	return &permanentError{Err: err}
 }
 
+// GetCausePermanentError returns cause of a permanent error.
+// When a given error is not permanent then original error is returned.
+func GetCausePermanentError(err error) error {
+	if e, ok := isPermanent(err); ok {
+		return e.Cause()
+	}
+
+	return err
+}
+
 func isPermanent(err error) (*permanentError, bool) {
 	type causer interface {
 		Cause() error
@@ -74,38 +84,25 @@ func isPermanent(err error) (*permanentError, bool) {
 
 // retry the given operation until it succeeds,
 // has a permanent failure or times out.
-func retry(ctx context.Context, op func() error, timeout time.Duration) error {
+func retry(op func() error, b backoff.BackOff) error {
 	var failure error
 	wrappedOp := func() error {
 		if err := op(); err == nil {
 			return nil
+		} else if pe, ok := isPermanent(err); ok {
+			// Detected permanent error.
+			failure = pe.Err
+			return nil
 		} else {
-			if pe, ok := isPermanent(err); ok {
-				// Detected permanent error
-				failure = pe.Err
-				return nil
-			} else {
-				return err
-			}
+			return err
 		}
 	}
 
-	eb := backoff.NewExponentialBackOff()
-	eb.MaxElapsedTime = timeout
-	eb.MaxInterval = timeout / 3
-
-	var b backoff.BackOff
-	if ctx != nil {
-		b = backoff.WithContext(eb, ctx)
-	} else {
-		b = eb
-	}
-
 	if err := backoff.Retry(wrappedOp, b); err != nil {
-		return maskAny(err)
+		return err
 	}
 	if failure != nil {
-		return maskAny(failure)
+		return errors.WithMessage(failure, "permanent error")
 	}
 	return nil
 }
@@ -113,7 +110,10 @@ func retry(ctx context.Context, op func() error, timeout time.Duration) error {
 // Retry the given operation until it succeeds,
 // has a permanent failure or times out.
 func Retry(op func() error, timeout time.Duration) error {
-	return retry(nil, op, timeout)
+	eb := backoff.NewExponentialBackOff()
+	eb.MaxElapsedTime = timeout
+	eb.MaxInterval = timeout / 3
+	return retry(op, eb)
 }
 
 // Func is a function to be performed with retry logic.
@@ -146,8 +146,52 @@ func RetryWithContext(ctx context.Context, op Func, timeout time.Duration, minAt
 		}
 		return nil
 	}
-	if err := retry(ctx, ctxOp, timeout); err != nil {
+
+	eb := backoff.NewExponentialBackOff()
+	eb.MaxElapsedTime = timeout
+	eb.MaxInterval = timeout / 3
+	b := backoff.WithContext(eb, ctx)
+	if err := retry(ctxOp, b); err != nil {
 		return maskAny(err)
 	}
 	return nil
+}
+
+// WithTimeoutContext retries the given operation with exponential backoff until it succeeds.
+// It breaks if `op` functions returns permanent error or when the given context is canceled.
+// The timeout is the minimum between the timeout of the context and the given timeout.
+func WithTimeoutContext(ctx context.Context, op Func, timeout time.Duration) error {
+	if deadline, ok := ctx.Deadline(); ok {
+		ctxTimeout := time.Until(deadline)
+		if ctxTimeout < timeout {
+			timeout = ctxTimeout
+		}
+	}
+	var cancel context.CancelFunc
+	ctx, cancel = context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	ctxOp := func() error {
+		return op(ctx)
+	}
+
+	eb := backoff.NewExponentialBackOff()
+	eb.MaxElapsedTime = timeout
+	eb.MaxInterval = timeout / 3
+	b := backoff.WithContext(eb, ctx)
+	return retry(ctxOp, b)
+}
+
+// WithTimeoutContextAndInterval acts the same as WithTimeoutContext but with constant backoff
+func WithTimeoutContextAndInterval(ctx context.Context, op Func, timeout time.Duration, interval time.Duration) error {
+	var cancel context.CancelFunc
+	ctx, cancel = context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	ctxOp := func() error {
+		return op(ctx)
+	}
+
+	b := backoff.WithContext(backoff.NewConstantBackOff(interval), ctx)
+	return retry(ctxOp, b)
 }

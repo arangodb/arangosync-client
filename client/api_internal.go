@@ -64,14 +64,16 @@ type InternalMasterAPI interface {
 	CancelSynchronizeShard(ctx context.Context, dbName, colName string, shardIndex int) error
 	// Report status of the synchronization of a shard back to the master.
 	SynchronizeShardStatus(ctx context.Context, entries []SynchronizationShardStatusRequestEntry) error
+	// UpdateIncomingSynchronizationStatus updates details of synchronization status at master.
+	UpdateIncomingSynchronizationStatus(ctx context.Context, update UpdateIncomingSynchronizationStatusRequest) error
 	// IsChannelRelevant checks if a MQ channel is still relevant
 	IsChannelRelevant(ctx context.Context, channelName string) (bool, error)
 
 	// Worker & Master -> Master
-	// GetDirectMQTopicEndpoint returns an endpoint that the caller can use to fetch direct MQ messages
-	// from.
+
+	// GetDirectMQTopicEndpoint returns an endpoint which can be used to fetch direct MQ messages from.
 	// This method requires a directMQ token or client cert for authentication.
-	GetDirectMQTopicEndpoint(ctx context.Context, channelName string) (DirectMQTopicEndpoint, error)
+	GetDirectMQTopicEndpoint(ctx context.Context, channelName, db, col string, shard uint) (DirectMQTopicEndpoint, error)
 	// RenewDirectMQToken renews a given direct MQ token.
 	// This method requires a directMQ token for authentication.
 	RenewDirectMQToken(ctx context.Context, token string) (DirectMQToken, error)
@@ -122,7 +124,7 @@ type InternalWorkerAPI interface {
 	Configure(ctx context.Context, JWTSecret string) error
 	// SetDirectMQTopicToken configures the token used to access messages of a given channel.
 	SetDirectMQTopicToken(ctx context.Context, channelName, token string, tokenTTL time.Duration) error
-	// Add entire direct MQ API
+	// InternalDirectMQAPI adds entire direct MQ API.
 	InternalDirectMQAPI
 }
 
@@ -330,6 +332,11 @@ type SynchronizationShardStatusRequestEntry struct {
 	Status     SynchronizationStatus `json:"status"`
 }
 
+// UpdateIncomingSynchronizationStatusRequest is the request body for UpdateIncomingSynchronizationStatus request
+type UpdateIncomingSynchronizationStatusRequest struct {
+	TotalNumberOfShards int `json:"totalNumberOfShards"`
+}
+
 type SynchronizationStatus struct {
 	// Current status
 	Status SyncStatus `json:"status"`
@@ -363,6 +370,7 @@ func (s SynchronizationStatus) IsSame(other SynchronizationStatus) bool {
 
 // TaskCompletedRequest holds the info for a TaskCompleted request.
 type TaskCompletedRequest struct {
+	// Error is set when task finished with error.
 	Error bool `json:"error,omitempty"`
 }
 
@@ -391,11 +399,6 @@ func (i TaskInfo) IsAssigned() bool {
 	return i.Assignment.WorkerID != ""
 }
 
-// NeedsCleanup returns true when the entry is subject to cleanup.
-func (i TaskInfo) NeedsCleanup() bool {
-	return i.Assignment.Counter > 0 && !i.Task.Persistent
-}
-
 // TasksResponse is the JSON response for MasterAPI.Tasks method.
 type TasksResponse struct {
 	Tasks []TaskInfo `json:"tasks,omitempty"`
@@ -419,9 +422,11 @@ type IsChannelRelevantResponse struct {
 // StatusAPI describes the API provided to task workers used to send status updates to the master.
 type StatusAPI interface {
 	// SendIncomingStatus queues a given incoming synchronization status entry for sending.
-	SendIncomingStatus(entry SynchronizationShardStatusRequestEntry)
+	SendIncomingStatus(ctx context.Context, entry SynchronizationShardStatusRequestEntry) error
 	// SendOutgoingStatus queues a given outgoing synchronization status entry for sending.
-	SendOutgoingStatus(entry SynchronizationShardStatusRequestEntry)
+	SendOutgoingStatus(ctx context.Context, entry SynchronizationShardStatusRequestEntry) error
+	// UpdateSynchronizationStatus queues a request to update total number of shards that should be synchronized from source cluster.
+	UpdateSynchronizationStatus(ctx context.Context, req UpdateIncomingSynchronizationStatusRequest) error
 }
 
 // DirectMQToken provides a token with its TTL
