@@ -38,12 +38,13 @@ import (
 )
 
 var (
-	Cause       = errs.Cause
-	New         = errs.New
-	WithStack   = errs.WithStack
-	Wrap        = errs.Wrap
-	Wrapf       = errs.Wrapf
-	WithMessage = errs.WithMessage
+	Cause        = errs.Cause
+	New          = errs.New
+	WithStack    = errs.WithStack
+	Wrap         = errs.Wrap
+	Wrapf        = errs.Wrapf
+	WithMessage  = errs.WithMessage
+	WithMessagef = errs.WithMessagef
 )
 
 type timeout interface {

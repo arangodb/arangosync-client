@@ -59,6 +59,14 @@ type StatusError struct {
 	message    string
 }
 
+// NewStatusError returns new status error which is serialized in the response to the client.
+func NewStatusError(statusCode int, message string) StatusError {
+	return StatusError{
+		StatusCode: statusCode,
+		message:    message,
+	}
+}
+
 func (e StatusError) Error() string {
 	if e.message != "" {
 		return e.message
@@ -76,12 +84,16 @@ func IsStatusError(err error) (int, bool) {
 	return 0, false
 }
 
-// IsStatusErrorWithCode returns true if the given error is caused
-// by a StatusError with given code.
-func IsStatusErrorWithCode(err error, code int) bool {
+// IsStatusErrorWithCode returns true if the given error is caused by a StatusError with given code.
+// Additionally message can be checked too.
+func IsStatusErrorWithCode(err error, code int, message ...string) bool {
 	err = errors.Cause(err)
 	if serr, ok := err.(StatusError); ok {
-		return serr.StatusCode == code
+		if len(message) == 0 {
+			return serr.StatusCode == code
+		}
+
+		return serr.StatusCode == code && serr.message == message[0]
 	}
 	return false
 }
@@ -109,8 +121,8 @@ func IsRedirectTo(err error) (string, bool) {
 }
 
 // IsNotFound returns true if the given error is caused by a NotFoundError.
-func IsNotFound(err error) bool {
-	return IsStatusErrorWithCode(err, http.StatusNotFound)
+func IsNotFound(err error, message ...string) bool {
+	return IsStatusErrorWithCode(err, http.StatusNotFound, message...)
 }
 
 // IsServiceUnavailable returns true if the given error is caused by a ServiceUnavailableError.

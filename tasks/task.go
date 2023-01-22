@@ -40,6 +40,10 @@ type TaskController interface {
 	ResetTask(ctx context.Context, dbName, col string, shardIndex int) error
 	// GetMessageTimeout gets message timeout for a task.
 	GetMessageTimeout() time.Duration
+	// AddTaskToInitialSyncQueue returns true if task has been added to an initial-sync queue.
+	AddTaskToInitialSyncQueue(taskID string) bool
+	// RemoveTaskFromInitialSyncQueue informs task controller about initial-sync completion phase.
+	RemoveTaskFromInitialSyncQueue(taskID string)
 }
 
 // TaskData contains persistent data of a task.
@@ -98,15 +102,22 @@ func (t TaskType) String() string {
 	return string(t)
 }
 
+// TaskCleaner is a task's cleaner interface.
+type TaskCleaner interface {
+	// CleanUp cleans up a task when it finishes.
+	CleanUp(ctx context.Context) error
+}
+
 // TaskWorker is a generic interface for the implementation of a task.
 type TaskWorker interface {
+	TaskCleaner
 	// Run the task.
 	// Do not return until completion or a fatal error occurs
 	Run() error
 
 	// Stop the task.
 	// If waitUntilFinished is set, do not return until the task has been stopped.
-	Stop(waitUntilFinished bool) error
+	Stop(waitUntilFinished bool)
 
 	// RenewTokens is called once every 5 minutes. The task worker is expected to renew all
 	// authentication tokens it needs.

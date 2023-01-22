@@ -2,6 +2,8 @@ github.com/arangodb-helper/go-certificates v0.0.0-20180821055445-9fca24fc2680 h1
 github.com/arangodb-helper/go-certificates v0.0.0-20180821055445-9fca24fc2680/go.mod h1:xDyzBwyYzcEhsaDXtmxCNM4p5BrtuoVYYsRTuJqmCeg=
 github.com/arangodb/go-driver v0.0.0-20210621075908-e7a6fa0cbd18 h1:3J0tqp5eQ8ptGOeeu7vo92RKf24bOA7MFy0z3uPiTWg=
 github.com/arangodb/go-driver v0.0.0-20210621075908-e7a6fa0cbd18/go.mod h1:3NUekcRLpgheFIGEwcOvxilEW73MV1queNKW58k7sdc=
+github.com/arangodb/go-driver v1.4.1 h1:Jg0N7XKxiKwjswmAcMCnefWmt81KJEqybqRAGJDRWlo=
+github.com/arangodb/go-driver v1.4.1/go.mod h1:UTtaxTUMmyPWzKc2dsWWOZzZ3yM6aHWxn/eubGa3YmQ=
 github.com/arangodb/go-velocypack v0.0.0-20200318135517-5af53c29c67e h1:Xg+hGrY2LcQBbxd0ZFdbGSyRKTYMZCfBbw/pMJFOk1g=
 github.com/arangodb/go-velocypack v0.0.0-20200318135517-5af53c29c67e/go.mod h1:mq7Shfa/CaixoDxiyAAc5jZ6CVBAyPaNQCGS7mkj4Ho=
 github.com/cenkalti/backoff/v4 v4.1.3 h1:cFAlzYUlVYDysBEH2T5hyJZMh3+5+WCBvSnK6Q8UtC4=
@@ -15,6 +17,8 @@ github.com/dchest/uniuri v0.0.0-20160212164326-8902c56451e9/go.mod h1:GgB8SF9nRG
 github.com/dgrijalva/jwt-go v3.2.0+incompatible/go.mod h1:E3ru+11k8xSBh+hMPgOLZmtrrCbhqsmaPHjLKYnJCaQ=
 github.com/golang-jwt/jwt v3.2.1+incompatible h1:73Z+4BJcrTC+KczS6WvTPvRGOp1WmfEP4Q1lOd9Z/+c=
 github.com/golang-jwt/jwt v3.2.1+incompatible/go.mod h1:8pz2t5EyA70fFQQSrl6XZXzqecmYZeUEB8OUGHkxJ+I=
+github.com/golang-jwt/jwt v3.2.2+incompatible h1:IfV12K8xAKAnZqdXVzCZ+TOjboZ2keLg81eXfW3O+oY=
+github.com/golang-jwt/jwt v3.2.2+incompatible/go.mod h1:8pz2t5EyA70fFQQSrl6XZXzqecmYZeUEB8OUGHkxJ+I=
 github.com/google/addlicense v0.0.0-20200817051935-6f4cd4aacc89/go.mod h1:EMjYTRimagHs1FwlIqKyX3wAM0u3rA+McvlIIWmSamA=
 github.com/google/uuid v1.1.1/go.mod h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+yHo=
 github.com/pavel-v-chernykh/keystore-go v2.1.0+incompatible h1:Jd6xfriVlJ6hWPvYOE0Ni0QWcNTLRehfGPFxr3eSL80=

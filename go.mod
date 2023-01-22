@@ -1,12 +1,12 @@
 module github.com/arangodb/arangosync-client
 
-go 1.17
+go 1.19
 
 require (
 	github.com/arangodb-helper/go-certificates v0.0.0-20180821055445-9fca24fc2680
-	github.com/arangodb/go-driver v0.0.0-20210621075908-e7a6fa0cbd18
+	github.com/arangodb/go-driver v1.4.1
 	github.com/cenkalti/backoff/v4 v4.1.3
-	github.com/golang-jwt/jwt v3.2.1+incompatible
+	github.com/golang-jwt/jwt v3.2.2+incompatible
 	github.com/pkg/errors v0.9.1
 	github.com/rs/zerolog v1.19.0
 	github.com/stretchr/testify v1.5.1

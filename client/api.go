@@ -26,6 +26,7 @@ package client
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/pkg/errors"
@@ -68,13 +69,31 @@ const (
 	ClientIDHeaderKey = "X-ArangoSync-Client-ID"
 )
 
+// GetSyncStatusDetails specifies what details will be sent in response for sync Status request
+type GetSyncStatusDetails string
+
+const (
+	// GetSyncStatusDetailsFull will return fully populated SyncInfo
+	GetSyncStatusDetailsFull = "full"
+	// GetSyncStatusDetailsShort does not return Shards info - only total count
+	GetSyncStatusDetailsShort = "short"
+)
+
+func (d GetSyncStatusDetails) IsValid() bool {
+	switch d {
+	case GetSyncStatusDetailsFull, GetSyncStatusDetailsShort:
+		return true
+	}
+	return false
+}
+
 // MasterAPI contains API of sync master
 type MasterAPI interface {
-	// Gets the current status of synchronization towards the local cluster.
-	Status(ctx context.Context) (SyncInfo, error)
-	// Configure the master to synchronize the local cluster from a given remote cluster.
+	// Status Gets the current status of synchronization towards the local cluster.
+	Status(ctx context.Context, details GetSyncStatusDetails) (SyncInfo, error)
+	// Synchronize configures the master to synchronize the local cluster from a given remote cluster.
 	Synchronize(ctx context.Context, input SynchronizationRequest) error
-	// Configure the master to stop & completely cancel the current synchronization of the
+	// CancelSynchronization configure the master to stop & completely cancel the current synchronization of the
 	// local cluster from a remote cluster.
 	// If this is an active synchronization barrier, this is automatically canceled.
 	// Errors:
@@ -98,22 +117,22 @@ type MasterAPI interface {
 	// in the current synchronization that stops the source cluster from accepting any modifications
 	// such that the destination cluster can catch up.
 	GetSynchronizationBarrierStatus(ctx context.Context) (SynchronizationBarrierStatus, error)
-	// Reset a failed shard synchronization.
+	// ResetShardSynchronization resets failed shard synchronization.
 	ResetShardSynchronization(ctx context.Context, dbName, colName string, shardIndex int) error
 	// GetMessageTimeout gets current allowed time between messages in a task channel.
 	GetMessageTimeout(ctx context.Context) (MessageTimeoutInfo, error)
-	// Update the maximum allowed time between messages in a task channel.
+	// SetMessageTimeout updates the maximum allowed time between messages in a task channel.
 	SetMessageTimeout(ctx context.Context, timeout time.Duration) error
-	// Return a list of all known master endpoints of this datacenter.
+	// GetEndpoints returns a list of all known master endpoints of this datacenter.
 	// The resulting endpoints are usable from inside and outside the datacenter.
 	GetEndpoints(ctx context.Context) (Endpoint, error)
-	// Return a list of master endpoints of the leader (syncmaster) of this datacenter.
+	// GetLeaderEndpoint returns a list of master endpoints of the leader (syncmaster) of this datacenter.
 	// Length of returned list will be 1 or the call will fail because no master is available.
 	// In the very rare occasion that the leadership is changing during this call, a list
 	// of length 0 can be returned.
 	// The resulting endpoint is usable only within the same datacenter.
 	GetLeaderEndpoint(ctx context.Context) (Endpoint, error)
-	// Return a list of known masters in this datacenter.
+	// Masters returns a list of known masters in this datacenter.
 	Masters(ctx context.Context) ([]MasterInfo, error)
 
 	InternalMasterAPI
@@ -165,6 +184,12 @@ type SyncInfo struct {
 	Status SyncStatus `json:"status"`
 	// Status of incoming synchronization per shard
 	Shards []ShardSyncInfo `json:"shards,omitempty"`
+	// ShardsCount contains number of shards which have a corresponding synchronization task.
+	// This field is always populated, while Shards populated only if GetSyncStatusDetailsFull is provided
+	ShardsCount int `json:"shardsCount,omitempty"`
+	// TotalShardsCount contains total number of shards which should be synchronized.
+	// It equals to the number of "leader shards" on source cluster minus shards excluded from sync.
+	TotalShardsCount int `json:"totalShardsCount,omitempty"`
 	// Status of outgoing synchronization
 	Outgoing []OutgoingSyncInfo `json:"outgoing,omitempty"`
 	// CancellationAborted is set to true when it was not possible to cancel synchronization on source DC.
@@ -178,6 +203,7 @@ type OutgoingSyncInfo struct {
 	Endpoint      Endpoint        `json:"endpoint"`                 // Endpoint of sync masters to which data is being send
 	Status        SyncStatus      `json:"status"`                   // Overall status for this outgoing target
 	Shards        []ShardSyncInfo `json:"shards,omitempty"`         // Status of outgoing synchronization per shard for this target
+	ShardsCount   int             `json:"shardsCount,omitempty"`    // ShardsCount holds the total count of shards
 	ActiveBarrier bool            `json:"active_barrier,omitempty"` // Set if this outgoing target has requested a synchronization barrier
 }
 
@@ -257,7 +283,11 @@ func (s SyncStatus) IsActive() bool {
 	return s == SyncStatusInitializing || s == SyncStatusInitialSync || s == SyncStatusRunning
 }
 
-//
+// GetShardStatusMessage returns sync status message.
+func (s SyncStatus) GetShardStatusMessage() string {
+	return fmt.Sprintf("shard's status %s", s)
+}
+
 // TLSAuthentication contains configuration for using client certificates
 // and TLS verification of the server.
 type TLSAuthentication = tasks.TLSAuthentication
@@ -502,9 +532,10 @@ type DataCenterCollectionResponse struct {
 
 // DataCenterDatabaseResponse stores information about a database in the data center.
 type DataCenterDatabaseResponse struct {
-	DatabaseID  string                                  `json:"database_id"`
-	Collections map[string]DataCenterCollectionResponse `json:"collections,omitempty"`
-	Err         string                                  `json:"error"`
+	DatabaseID          string                                  `json:"database_id"`
+	Collections         map[string]DataCenterCollectionResponse `json:"collections,omitempty"`
+	ExcludedCollections map[string]DataCenterCollectionResponse `json:"excluded_collections,omitempty"`
+	Err                 string                                  `json:"error"`
 }
 
 // DataCenterResponse stores information about databases in the data center.
@@ -513,9 +544,29 @@ type DataCenterResponse struct {
 	ID        string                                `json:"id"`
 }
 
+func (dc *DataCenterResponse) GetExcludedShardsCount() int {
+	count := 0
+	for _, db := range dc.Databases {
+		for _, col := range db.ExcludedCollections {
+			count += len(col.Shards)
+		}
+	}
+	return count
+}
+
 // DataCentersResponse stores information about databases in many data centers.
 type DataCentersResponse struct {
 	DataCenters []DataCenterResponse `json:"datacenters,omitempty"`
+}
+
+// ByID returns DataCenterResponse for DC with specified id
+func (dcr *DataCentersResponse) ByID(id string) *DataCenterResponse {
+	for _, r := range dcr.DataCenters {
+		if r.ID == id {
+			return &r
+		}
+	}
+	return nil
 }
 
 // IsInactive checks whether the replication is turned off.
@@ -527,11 +578,23 @@ func (s SyncInfo) IsInactive() bool {
 	}
 
 	// From here on it is known that it is not source or proxy data center.
-	if len(s.Shards) > 0 {
+	if s.ShardsCount > 0 {
 		// There are some incoming data, so definitely it is not inactive.
 		return false
 	}
 
 	// The below status relates only to incoming data cluster.
 	return s.Status.Normalize() == SyncStatusInactive
+}
+
+// GetOutgoingStatus returns status of a given cluster ID.
+// Returns false if cluster ID is not found.
+func (s SyncInfo) GetOutgoingStatus(id string) (SyncStatus, bool) {
+	for _, info := range s.Outgoing {
+		if info.ID == id {
+			return info.Status.Normalize(), true
+		}
+	}
+
+	return "", false
 }

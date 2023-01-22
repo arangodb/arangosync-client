@@ -1,5 +1,5 @@
 //
-// Copyright 2017-2022 ArangoDB GmbH, Cologne, Germany
+// Copyright 2017-2023 ArangoDB GmbH, Cologne, Germany
 //
 // The Programs (which include both the software and documentation) contain
 // proprietary information of ArangoDB GmbH; they are provided under a license
@@ -86,9 +86,10 @@ func (c *client) UpdateMessageQueue(ctx context.Context, input UpdateMQConfigReq
 	return nil
 }
 
-// Gets the current status of synchronization towards the local cluster.
-func (c *client) Status(ctx context.Context) (SyncInfo, error) {
-	url := c.createURLs("/_api/sync", nil)
+// Status returns the current status of synchronization towards the local cluster.
+func (c *client) Status(ctx context.Context, details GetSyncStatusDetails) (SyncInfo, error) {
+	query := url.Values{"details": []string{string(details)}}
+	url := c.createURLs("/_api/sync", query)
 
 	var result SyncInfo
 	req, err := c.newRequests("GET", url, nil)
@@ -347,6 +348,20 @@ func (c *client) SynchronizeShardStatus(ctx context.Context, entries []Synchroni
 	if err := c.do(ctx, req, nil); err != nil {
 		return maskAny(err)
 	}
+	return nil
+}
+
+// UpdateIncomingSynchronizationStatus updates details of synchronization status at master.
+func (c *client) UpdateIncomingSynchronizationStatus(ctx context.Context, updateReq UpdateIncomingSynchronizationStatusRequest) error {
+	url := c.createURLs(path.Join("/_api/sync/status"), nil)
+
+	req, err := c.newRequests("PUT", url, updateReq)
+	if err != nil {
+		return errors.WithMessage(err, "failed to create a request")
+	}
+	if err := c.do(ctx, req, nil); err != nil {
+		return errors.WithMessage(err, "failed to perform a request")
+	}
 
 	return nil
 }
@@ -367,18 +382,26 @@ func (c *client) IsChannelRelevant(ctx context.Context, channelName string) (boo
 	return result.IsRelevant, nil
 }
 
-// GetDirectMQTopicEndpoint returns an endpoint that the caller can use to fetch direct MQ messages
-// from.
-func (c *client) GetDirectMQTopicEndpoint(ctx context.Context, channelName string) (DirectMQTopicEndpoint, error) {
-	url := c.createURLs(path.Join("/_api/mq/direct/channel", url.PathEscape(channelName), "endpoint"), nil)
+// GetDirectMQTopicEndpoint returns an endpoint which can be used to fetch direct MQ messages from.
+func (c *client) GetDirectMQTopicEndpoint(ctx context.Context, channelName, db, col string,
+	shard uint) (DirectMQTopicEndpoint, error) {
+	var query url.Values
+	if len(db) > 0 && len(col) > 0 {
+		// Persistent task does not have below values.
+		query = make(url.Values)
+		query["database"] = []string{db}
+		query["collection"] = []string{col}
+		query["shard"] = []string{strconv.Itoa(int(shard))}
+	}
 
+	url := c.createURLs(path.Join("/_api/mq/direct/channel", url.PathEscape(channelName), "endpoint"), query)
 	req, err := c.newRequests("GET", url, nil)
 	if err != nil {
-		return DirectMQTopicEndpoint{}, maskAny(err)
+		return DirectMQTopicEndpoint{}, err
 	}
 	var result DirectMQTopicEndpoint
 	if err := c.do(ctx, req, &result); err != nil {
-		return DirectMQTopicEndpoint{}, maskAny(err)
+		return DirectMQTopicEndpoint{}, err
 	}
 
 	return result, nil

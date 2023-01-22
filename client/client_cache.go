@@ -30,8 +30,6 @@ import (
 	"strings"
 	"sync"
 
-	certificates "github.com/arangodb-helper/go-certificates"
-
 	"github.com/arangodb/arangosync-client/pkg/errors"
 )
 
@@ -78,9 +76,9 @@ func (cc *ClientCache) GetClient(endpointsCreator EndpointsCreator, auth Authent
 
 // createClient creates a client used to access the source with given authentication.
 func (cc *ClientCache) createClient(endpoints Endpoint, isInternal bool, auth Authentication, insecureSkipVerify bool) (API, error) {
-	tlsConfig, err := certificates.CreateTLSConfigFromAuthentication(AuthProxy{auth.TLSAuthentication}, insecureSkipVerify)
-	if err != nil {
-		return nil, errors.WithMessage(err, "can not create certificate")
+	tlsConfig := &TLSConfig{
+		InsecureSkipVerify: insecureSkipVerify,
+		TLSAuth:            &auth.TLSAuthentication,
 	}
 
 	ac := createAuthenticationConfig(auth)
